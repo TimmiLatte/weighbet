@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>WeighBet</title>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+<script>
+// Apply theme before page renders to prevent flash
+(function(){
+  if(localStorage.getItem('wb-theme')==='dark') document.documentElement.classList.add('dark-mode');
+})();
+</script>
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, updateProfile } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
@@ -12,12 +18,12 @@ import { getFirestore, doc, setDoc, getDoc, getDocs, addDoc, updateDoc, deleteDo
 
 // ── PASTE YOUR FIREBASE CONFIG HERE ──────────────────────────
 const firebaseConfig = {
-  apiKey:            "YOUR_API_KEY",
-  authDomain:        "YOUR_PROJECT_ID.firebaseapp.com",
-  projectId:         "YOUR_PROJECT_ID",
-  storageBucket:     "YOUR_PROJECT_ID.appspot.com",
-  messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
-  appId:             "YOUR_APP_ID"
+  apiKey:            "AIzaSyB2WKhh1ezrPHSNoEPQb3POZJEccn2UmV0",
+  authDomain:        "weighbet.firebaseapp.com",
+  projectId:         "weighbet",
+  storageBucket:     "weighbet.firebasestorage.app",
+  messagingSenderId: "1090791593789",
+  appId:             "1:1090791593789:web:911672c0d7a44e3e98d754"
 };
 // ─────────────────────────────────────────────────────────────
 
@@ -36,6 +42,8 @@ let currentComp    = null;   // competition document data
 let compMembership = null;   // /competitions/{id}/members/{uid}
 let competitors    = [];     // members of current competition
 let allWeighIns    = [];     // weighins for current competition
+let personalWeighIns = [];   // all-time personal weigh-in log (cross-competition)
+let trackerGoal    = null;   // {targetWeight, unit, heightCm}
 let matchups       = [];
 let chatMessages   = [];
 let myCompetitions = [];     // competitions this user belongs to
@@ -377,6 +385,22 @@ function startListeners() {
     chatMessages=snap.docs.map(d=>({id:d.id,...d.data()}));
     if(currentPage==='chat')renderChatMessages();
   }));
+
+  // Personal tracker — global weigh-ins for this user (not competition-scoped)
+  if(currentUser) {
+    unsubs.push(onSnapshot(
+      query(collection(db,'users',currentUser.uid,'weighins'), orderBy('date','asc')),
+      snap => {
+        personalWeighIns = snap.docs.map(d=>({id:d.id,...d.data()}));
+        if(currentPage==='progress') renderProgressPage();
+      }
+    ));
+    // Load tracker goal
+    getDoc(doc(db,'users',currentUser.uid,'tracker','goal')).then(snap=>{
+      trackerGoal = snap.exists() ? snap.data() : null;
+      if(currentPage==='progress') renderProgressPage();
+    });
+  }
 }
 
 function stopListeners() { unsubs.forEach(u=>u()); unsubs=[]; }
@@ -513,6 +537,8 @@ async function joinCompetition(compId) {
   startListeners();
   showScreen('app-shell');
   updateNavForRole();
+  // Sync theme toggle labels now that DOM is available
+  applyTheme(document.documentElement.classList.contains('dark-mode'));
   showPage('dashboard');
 }
 
@@ -624,16 +650,18 @@ function showPage(id){
 window.showPage=showPage;
 function refreshCurrentPage(){refreshPage(currentPage);}
 function refreshPage(id){
-  if(id==='dashboard')  renderDashboard();
-  if(id==='leaderboard')renderLeaderboard();
-  if(id==='prizes')     renderPrizes();
-  if(id==='matchups')   renderMatchupWeek();
-  if(id==='weekly')     renderWeeklyResults();
-  if(id==='submit')     renderSubmitPage();
-  if(id==='chat')       renderChat();
-  if(id==='progress')   renderProgressPage();
-  if(id==='profile')    renderProfilePage();
-  if(id==='admin')      renderAdminPage();
+  if(id==='dashboard')   renderDashboard();
+  if(id==='leaderboard') renderLeaderboard();
+  if(id==='prizes')      renderPrizes();
+  if(id==='competition') { renderMatchupWeek(); renderWeeklyResults(); }
+  if(id==='matchups')    renderMatchupWeek();   // legacy support
+  if(id==='weekly')      renderWeeklyResults(); // legacy support
+  if(id==='submit')      renderSubmitPage();
+  if(id==='chat')        renderChat();
+  if(id==='me')          { renderProgressPage(); renderProfilePage(); }
+  if(id==='progress')    renderProgressPage();  // legacy support
+  if(id==='profile')     renderProfilePage();   // legacy support
+  if(id==='admin')       renderAdminPage();
 }
 
 // ════════════════════════════════════════════════════════════
@@ -829,6 +857,12 @@ window.submitWeighIn=async function(){
     var data={userId:targetUid,date:dateVal,weight:weightVal,unit,week,ts:serverTimestamp()};
     if(dupEntry&&isCompAdmin()){await updateDoc(doc(db,'competitions',currentCompId,'weighins',dupEntry.id),data);}
     else{await addDoc(collection(db,'competitions',currentCompId,'weighins'),data);}
+
+    // Also write to personal tracker (global, not competition-scoped)
+    // Use date as document ID so duplicates auto-overwrite
+    var personalRef = doc(db,'users',targetUid,'weighins',dateVal);
+    await setDoc(personalRef, { date:dateVal, weight:weightVal, unit, ts:serverTimestamp() }, { merge:true });
+
     var msg=isFirst?'Starting weight saved! Welcome to '+currentComp?.name+'!':'Weigh-in saved for '+fmtDate(dateVal)+'!';
     showAlert('submit-alert',msg,'success');
     $('submit-weight').value=''; renderSubmitPage();
@@ -873,34 +907,149 @@ function calcAchievements(uid){
 // ════════════════════════════════════════════════════════════
 // MY PROGRESS
 // ════════════════════════════════════════════════════════════
+// ── TRACKER HELPERS ─────────────────────────────────────────
+function calcBMI(weightKg, heightCm) {
+  if (!weightKg || !heightCm) return null;
+  var hm = heightCm / 100;
+  return weightKg / (hm * hm);
+}
+function bmiCategory(bmi) {
+  if (bmi == null) return null;
+  if (bmi < 18.5) return { label:'Underweight', color:'#5fd4b3' };
+  if (bmi < 25)   return { label:'Healthy',     color:'#5fd4a0' };
+  if (bmi < 30)   return { label:'Overweight',  color:'#f7b26a' };
+  return               { label:'Obese',         color:'#e05252' };
+}
+function calcProjectedDate(wi, targetWeight) {
+  if (!wi || wi.length < 2 || !targetWeight) return null;
+  var latest = wi[wi.length-1].weight;
+  if (latest <= targetWeight) return 'Already reached!';
+  // Linear regression on day offsets
+  var start = new Date(wi[0].date+'T00:00:00');
+  var xs = wi.map(function(e) { var d=new Date(e.date+'T00:00:00'); return Math.round((d-start)/(24*60*60*1000)); });
+  var ys = wi.map(function(e) { return e.weight; });
+  var n=xs.length, sumX=xs.reduce(function(a,b){return a+b;},0), sumY=ys.reduce(function(a,b){return a+b;},0);
+  var sumXY=xs.reduce(function(a,x,i){return a+x*ys[i];},0), sumX2=xs.reduce(function(a,x){return a+x*x;},0);
+  var denom=n*sumX2-sumX*sumX;
+  if (denom === 0) return null;
+  var slope=(n*sumXY-sumX*sumY)/denom;
+  if (slope >= 0) return 'Weight not trending down';
+  var intercept=(sumY-slope*sumX)/n;
+  var daysToGoal = (targetWeight - intercept) / slope;
+  if (daysToGoal < 0 || daysToGoal > 3650) return null;
+  var projDate = new Date(start); projDate.setDate(projDate.getDate() + Math.round(daysToGoal));
+  return fmtDate(projDate.toISOString().slice(0,10));
+}
+function calcWeeklyRate(wi) {
+  if (!wi || wi.length < 2) return null;
+  var first=wi[0], last=wi[wi.length-1];
+  var days=Math.max(1,(new Date(last.date+'T00:00:00')-new Date(first.date+'T00:00:00'))/(24*60*60*1000));
+  var weeks=days/7;
+  return weeks > 0 ? (first.weight-last.weight)/weeks : null;
+}
+
 function renderProgressPage(){
   if(!$('page-progress'))return;
-  var uid=currentUser?.uid, wi=userWeighIns(uid), sw=wi.length?wi[0]:null, unit=sw?.unit||'kg';
+  var uid = currentUser?.uid;
+
+  // Use personal (global) weigh-ins for the tracker — all-time, not competition-scoped
+  var allWI = personalWeighIns.length > 0 ? personalWeighIns : userWeighIns(uid);
+  var sw    = allWI.length ? allWI[0] : null;
+  var unit  = sw?.unit || (trackerGoal?.unit) || 'kg';
+
+  // Competition weigh-ins for competition-specific stats
+  var compWI = userWeighIns(uid);
+  var compSw = compWI.length ? compWI[0] : null;
+
+  // Compare selector
   var compSel=$('progress-compare-sel');
   if(compSel){var saved=compSel.value;compSel.innerHTML='<option value="">Choose a competitor...</option>'+competitors.filter(c=>c.uid!==uid).map(c=>'<option value="'+c.uid+'"'+(c.uid===saved?' selected':'')+'>'+c.displayName+'</option>').join('');}
   renderProgressChart();
-  var kgLost=sw?sw.weight-wi[wi.length-1].weight:0, totPct=totalPctLost(uid)||0;
-  var dates=wi.map(e=>e.date).sort(), curStrk=0, tmp=0;
-  for(var i=dates.length-1;i>=1;i--){var d1=new Date(dates[i]+'T00:00:00'),d2=new Date(dates[i-1]+'T00:00:00');if((d1-d2)/(24*60*60*1000)===1){tmp++;}else break;}
-  curStrk=tmp+(wi.length>0?1:0);
-  var curWeek=getCurrentWeek(), h2hWins=0;
-  for(var ww=1;ww<=curWeek;ww++)getAllH2HResults(ww).forEach(r=>{if(r.winner===uid)h2hWins++;});
-  var myRank=getCompetitorStats().findIndex(c=>c.uid===uid)+1;
-  $('progress-stats-grid').innerHTML=[
-    {icon:'⚖️',label:kgLost>=0?'Total Lost':'Total Gained',val:kgLost!==0?Math.abs(kgLost).toFixed(1)+' '+unit+(kgLost<0?' gained':' lost'):'0 '+unit,sub:'from starting weight'},
-    {icon:totPct>=0?'📉':'📈',label:totPct>=0?'% Lost':'% Gained',val:totPct!==0?Math.abs(totPct).toFixed(2)+'%'+(totPct<0?' gained':' lost'):'0%',sub:'of body weight'},
-    {icon:'📅',label:'Current Streak',val:curStrk+(curStrk===1?' day':' days'),sub:'consecutive weigh-ins'},
-    {icon:'⚔️',label:'H2H Wins',val:h2hWins,sub:'matchup victories'},
-    {icon:'🏆',label:'Current Rank',val:myRank>0?'#'+myRank:'—',sub:'out of '+competitors.length},
-    {icon:'📊',label:'Weigh-ins',val:wi.length,sub:'total logged'}
-  ].map(s=>'<div class="card card-sm" style="text-align:center;padding:18px 12px"><div style="font-size:26px;margin-bottom:6px">'+s.icon+'</div><div style="font-family:Syne,sans-serif;font-weight:700;font-size:20px;color:var(--text)">'+s.val+'</div><div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);margin-top:4px">'+s.label+'</div><div style="font-size:11px;color:var(--muted);margin-top:2px">'+s.sub+'</div></div>').join('');
 
-  // Personal earnings
+  // ── TRACKER GOAL SECTION ─────────────────────────────────
+  var goal = trackerGoal;
+  var goalEl = $('tracker-goal-section');
+  if (goalEl) {
+    var curWeight = allWI.length ? allWI[allWI.length-1].weight : null;
+    var targetW   = goal?.targetWeight || null;
+    var heightCm  = goal?.heightCm || null;
+    var bmi       = curWeight && heightCm ? calcBMI(curWeight, heightCm) : null;
+    var bmiCat    = bmiCategory(bmi);
+    var projDate  = targetW && allWI.length >= 2 ? calcProjectedDate(allWI, targetW) : null;
+    var weekRate  = calcWeeklyRate(allWI);
+    var kgToGoal  = targetW && curWeight ? curWeight - targetW : null;
+    var goalPct   = targetW && sw ? Math.min(100, Math.max(0, ((sw.weight - curWeight) / (sw.weight - targetW)) * 100)) : 0;
+
+    goalEl.innerHTML =
+      '<div class="grid-2 mb-16">' +
+      // Goal setting card
+      '<div class="card">' +
+        '<div class="section-title" style="font-size:14px">🎯 My Goal <span class="line"></span></div>' +
+        '<div class="form-row">' +
+          '<div class="form-group"><label>Target Weight ('+unit+')</label>' +
+            '<input type="number" id="goal-target" step="0.1" placeholder="e.g. 75.0" value="'+(targetW||'')+'" style="background:var(--bg3);border:1px solid var(--border);border-radius:9px;color:var(--text);padding:10px 14px;font-family:DM Sans,sans-serif;font-size:14px;outline:none;width:100%"></div>' +
+          '<div class="form-group"><label>Height (cm) — for BMI</label>' +
+            '<input type="number" id="goal-height" step="1" placeholder="e.g. 175" value="'+(heightCm||'')+'" style="background:var(--bg3);border:1px solid var(--border);border-radius:9px;color:var(--text);padding:10px 14px;font-family:DM Sans,sans-serif;font-size:14px;outline:none;width:100%"></div>' +
+        '</div>' +
+        '<button class="btn btn-primary btn-sm" onclick="saveTrackerGoal()">Save Goal</button>' +
+        '<div id="goal-save-alert" style="margin-top:8px"></div>' +
+      '</div>' +
+      // Stats card
+      '<div class="card">' +
+        '<div class="section-title" style="font-size:14px">📊 Tracker Stats <span class="line"></span></div>' +
+        (curWeight ? (
+          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
+          '<div style="text-align:center;padding:10px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);margin-bottom:4px">Current Weight</div><div style="font-family:Syne,sans-serif;font-weight:700;font-size:20px">'+curWeight.toFixed(1)+' '+unit+'</div></div>' +
+          (weekRate!=null?'<div style="text-align:center;padding:10px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);margin-bottom:4px">Weekly Rate</div><div style="font-family:Syne,sans-serif;font-weight:700;font-size:20px;color:'+(weekRate>0?'var(--success)':'var(--danger)')+'">'+Math.abs(weekRate).toFixed(2)+' '+unit+'/wk</div></div>':'') +
+          (bmi!=null?'<div style="text-align:center;padding:10px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);margin-bottom:4px">BMI</div><div style="font-family:Syne,sans-serif;font-weight:700;font-size:20px;color:'+bmiCat.color+'">'+bmi.toFixed(1)+'</div><div style="font-size:11px;color:'+bmiCat.color+'">'+bmiCat.label+'</div></div>':'') +
+          (projDate!=null?'<div style="text-align:center;padding:10px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);margin-bottom:4px">Goal by</div><div style="font-family:Syne,sans-serif;font-weight:700;font-size:15px;color:var(--accent2)">'+projDate+'</div></div>':'') +
+          '</div>'
+        ) : '<div style="color:var(--muted);font-size:13px">Log a weigh-in to see your stats</div>') +
+      '</div>' +
+      '</div>' +
+      // Goal progress bar
+      (targetW && sw && curWeight ? (
+        '<div class="card mb-16">' +
+          '<div class="flex-between mb-8">' +
+            '<span style="font-size:13px;font-weight:500">Progress to goal</span>' +
+            '<span style="font-size:13px;color:var(--muted)">'+(kgToGoal>0?kgToGoal.toFixed(1)+' '+unit+' to go':'Goal reached! 🎉')+'</span>' +
+          '</div>' +
+          '<div style="height:12px;background:var(--bg3);border-radius:6px;overflow:hidden">' +
+            '<div style="height:100%;width:'+goalPct.toFixed(1)+'%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:6px;transition:width 0.5s ease"></div>' +
+          '</div>' +
+          '<div class="flex-between mt-8">' +
+            '<span style="font-size:11px;color:var(--muted)">Start: '+sw.weight.toFixed(1)+' '+unit+'</span>' +
+            '<span style="font-size:12px;font-weight:600;color:var(--accent)">'+goalPct.toFixed(0)+'% complete</span>' +
+            '<span style="font-size:11px;color:var(--muted)">Goal: '+targetW.toFixed(1)+' '+unit+'</span>' +
+          '</div>' +
+        '</div>'
+      ) : '');
+  }
+
+  // ── COMPETITION STATS ────────────────────────────────────
+  var kgLost=compSw?compSw.weight-compWI[compWI.length-1]?.weight:0, totPct=totalPctLost(uid)||0;
+  var dates=allWI.map(function(e){return e.date;}).sort(), curStrk=0, tmp=0;
+  for(var i=dates.length-1;i>=1;i--){var d1=new Date(dates[i]+'T00:00:00'),d2=new Date(dates[i-1]+'T00:00:00');if((d1-d2)/(24*60*60*1000)===1){tmp++;}else break;}
+  curStrk=tmp+(allWI.length>0?1:0);
+  var curWeek=getCurrentWeek(), h2hWins=0;
+  for(var ww=1;ww<=curWeek;ww++) getAllH2HResults(ww).forEach(function(r){if(r.winner===uid)h2hWins++;});
+  var myRank=getCompetitorStats().findIndex(function(c){return c.uid===uid;})+1;
+
+  $('progress-stats-grid').innerHTML=[
+    {icon:'⚖️',label:kgLost>=0?'Competition Lost':'Competition Gained',val:kgLost!==0?Math.abs(kgLost).toFixed(1)+' '+unit+(kgLost<0?' gained':' lost'):'0 '+unit,sub:'since competition start'},
+    {icon:totPct>=0?'📉':'📈',label:totPct>=0?'Comp % Lost':'Comp % Gained',val:totPct!==0?Math.abs(totPct).toFixed(2)+'%'+(totPct<0?' gained':' lost'):'0%',sub:'of starting weight'},
+    {icon:'📅',label:'Streak',val:curStrk+(curStrk===1?' day':' days'),sub:'consecutive weigh-ins'},
+    {icon:'⚔️',label:'H2H Wins',val:h2hWins,sub:'matchup victories'},
+    {icon:'🏆',label:'Rank',val:myRank>0?'#'+myRank:'—',sub:'out of '+competitors.length},
+    {icon:'📊',label:'All-time Weigh-ins',val:allWI.length,sub:'personal tracker'}
+  ].map(function(s){return'<div class="card card-sm" style="text-align:center;padding:18px 12px"><div style="font-size:26px;margin-bottom:6px">'+s.icon+'</div><div style="font-family:Syne,sans-serif;font-weight:700;font-size:20px;color:var(--text)">'+s.val+'</div><div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);margin-top:4px">'+s.label+'</div><div style="font-size:11px;color:var(--muted);margin-top:2px">'+s.sub+'</div></div>';}).join('');
+
+  // ── EARNINGS ─────────────────────────────────────────────
   var pool=getPrizePool(), wksT=currentComp?.weeks||8, wBL2=pool*0.05/wksT;
   var myEarnH2H=0, myEarnBL=0;
   for(var ew=1;ew<=curWeek;ew++){
-    getAllH2HResults(ew).forEach(r=>{if(r.winner===uid)myEarnH2H+=r.prize;});
-    var wkBests=competitors.map(c=>({uid:c.uid,pct:weeklyPctLost(c.uid,ew)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct);
+    getAllH2HResults(ew).forEach(function(r){if(r.winner===uid)myEarnH2H+=r.prize;});
+    var wkBests=competitors.map(function(c){return{uid:c.uid,pct:weeklyPctLost(c.uid,ew)};}).filter(function(x){return x.pct!=null;}).sort(function(a,b){return b.pct-a.pct;});
     if(wkBests.length>0&&wkBests[0].uid===uid)myEarnBL+=wBL2;
   }
   var myTotal=myEarnH2H+myEarnBL;
@@ -908,11 +1057,23 @@ function renderProgressPage(){
     ?'<div style="color:var(--muted);font-size:13px;padding:8px 0">No confirmed earnings yet.</div>'
     :'<div class="grid-3"><div class="card card-sm" style="text-align:center"><div style="font-size:22px;margin-bottom:6px">💰</div><div style="font-family:Syne,sans-serif;font-weight:800;font-size:22px;color:var(--accent3)">'+fmtMoney(myTotal)+'</div><div style="font-size:12px;color:var(--muted);margin-top:4px">Total confirmed</div></div><div class="card card-sm" style="text-align:center"><div style="font-size:22px;margin-bottom:6px">⚔️</div><div style="font-family:Syne,sans-serif;font-weight:800;font-size:22px;color:var(--accent)">'+fmtMoney(myEarnH2H)+'</div><div style="font-size:12px;color:var(--muted);margin-top:4px">H2H winnings</div></div><div class="card card-sm" style="text-align:center"><div style="font-size:22px;margin-bottom:6px">📉</div><div style="font-family:Syne,sans-serif;font-weight:800;font-size:22px;color:var(--accent2)">'+fmtMoney(myEarnBL)+'</div><div style="font-size:12px;color:var(--muted);margin-top:4px">Weekly bonus</div></div></div><div style="font-size:12px;color:var(--muted);margin-top:10px;padding:10px 14px;background:var(--bg3);border-radius:8px">Biggest Loser prize (45%+15%) confirmed at competition end.</div>';
 
+  // ── ACHIEVEMENTS ──────────────────────────────────────────
   var badges=calcAchievements(uid);
   $('progress-achievements').innerHTML=badges.length===0
     ?'<div class="no-data" style="grid-column:1/-1;padding:24px"><div class="icon">🏅</div><p>Keep logging weigh-ins to earn badges!</p></div>'
-    :badges.map(b=>'<div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--bg3);border-radius:10px;border:1px solid '+b.color+'33"><div style="font-size:24px;width:36px;text-align:center">'+b.icon+'</div><div><div style="font-weight:600;font-size:13.5px;color:'+b.color+'">'+b.label+'</div><div style="font-size:12px;color:var(--muted)">'+b.desc+'</div></div></div>').join('');
+    :badges.map(function(b){return'<div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--bg3);border-radius:10px;border:1px solid '+b.color+'33"><div style="font-size:24px;width:36px;text-align:center">'+b.icon+'</div><div><div style="font-weight:600;font-size:13.5px;color:'+b.color+'">'+b.label+'</div><div style="font-size:12px;color:var(--muted)">'+b.desc+'</div></div></div>';}).join('');
 }
+
+window.saveTrackerGoal = async function() {
+  var targetWeight = parseFloat($('goal-target').value);
+  var heightCm     = parseFloat($('goal-height').value) || null;
+  if (isNaN(targetWeight) || targetWeight <= 0) { showAlert('goal-save-alert','Please enter a valid target weight','danger'); return; }
+  var unit = personalWeighIns.length > 0 ? personalWeighIns[0].unit : (userWeighIns(currentUser.uid)[0]?.unit || 'kg');
+  trackerGoal = { targetWeight, heightCm, unit };
+  await setDoc(doc(db,'users',currentUser.uid,'tracker','goal'), trackerGoal);
+  showAlert('goal-save-alert','Goal saved!','success');
+  renderProgressPage();
+};
 
 window.setProgressMode=function(mode){
   progressMode=mode;
@@ -924,7 +1085,10 @@ window.onCompareChange=function(){compareUid=$('progress-compare-sel').value||nu
 
 function renderProgressChart(){
   if(!$('progressChart'))return;
-  var uid=currentUser?.uid, wi=userWeighIns(uid), sw=wi.length?wi[0]:null;
+  var uid=currentUser?.uid;
+  // Use all-time personal tracker for the chart
+  var wi=personalWeighIns.length>0?personalWeighIns:userWeighIns(uid);
+  var sw=wi.length?wi[0]:null;
   if(progressChart){progressChart.destroy();progressChart=null;}
   if(!sw||wi.length<2){$('progress-chart-msg').style.display='';return;}
   $('progress-chart-msg').style.display='none';
@@ -1135,9 +1299,24 @@ window.clearAllWeighIns=async function(){
 </script>
 
 <style>
-:root{--bg:#0e0e10;--bg2:#16161a;--bg3:#1e1e24;--bg4:#26262e;--border:rgba(255,255,255,0.08);--border2:rgba(255,255,255,0.14);--text:#f0f0f4;--muted:#9090a0;--accent:#7c6af7;--accent2:#5fd4b3;--accent3:#f7b26a;--danger:#e05252;--success:#5fd4a0;--card-r:14px}
+:root{
+  --bg:#f5f5f0;--bg2:#ffffff;--bg3:#f0f0ea;--bg4:#e8e8e2;
+  --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+  --text:#1a1a1a;--muted:#707070;
+  --accent:#6357e0;--accent2:#1a9e7a;--accent3:#d4870a;
+  --danger:#cc3333;--success:#2a9d6a;--card-r:14px;
+  --shadow:0 1px 3px rgba(0,0,0,0.08);
+}
+.dark-mode{
+  --bg:#0e0e10;--bg2:#16161a;--bg3:#1e1e24;--bg4:#26262e;
+  --border:rgba(255,255,255,0.08);--border2:rgba(255,255,255,0.14);
+  --text:#f0f0f4;--muted:#9090a0;
+  --accent:#7c6af7;--accent2:#5fd4b3;--accent3:#f7b26a;
+  --danger:#e05252;--success:#5fd4a0;
+  --shadow:none;
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:14px}
+body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;transition:background .2s,color .2s}
 h1,h2,h3,h4{font-family:'Syne',sans-serif}
 .flex-center{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
 .auth-box,.comp-box{background:var(--bg2);border:1px solid var(--border2);border-radius:20px;padding:40px;width:460px;max-width:100%}
@@ -1159,7 +1338,7 @@ h1,h2,h3,h4{font-family:'Syne',sans-serif}
 .comp-card:hover{background:var(--bg4);border-color:var(--accent)}
 .comp-section{margin-top:24px;padding-top:24px;border-top:1px solid var(--border)}
 #app-shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
-.sidebar{background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow-y:auto}
+.sidebar{background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow-y:auto;box-shadow:var(--shadow)}
 .sidebar-logo{padding:22px 20px 12px;border-bottom:1px solid var(--border)}
 .sidebar-logo h1{font-size:18px;font-weight:800;letter-spacing:-0.5px}
 .sidebar-logo span{color:var(--accent)}
@@ -1181,7 +1360,7 @@ h1,h2,h3,h4{font-family:'Syne',sans-serif}
 .signout-btn:hover{color:var(--danger);background:rgba(224,82,82,0.1)}
 .main{padding:32px 36px;overflow-y:auto;min-height:100vh}
 .page{display:none}.page.active{display:block}
-.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--card-r);padding:22px 24px}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--card-r);padding:22px 24px;box-shadow:var(--shadow)}
 .card-sm{padding:16px 18px}
 .card-title{font-family:'Syne';font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);margin-bottom:6px}
 .card-value{font-family:'Syne';font-size:26px;font-weight:700;color:var(--text);line-height:1}
@@ -1284,7 +1463,7 @@ tr:hover td{background:var(--bg3)}
 @media(max-width:900px){
   #app-shell{grid-template-columns:1fr}
   .sidebar{display:none}
-  .main{padding:16px 14px 90px 14px}
+  .main{padding:16px 14px 80px 14px}
   .grid-4{grid-template-columns:repeat(2,1fr)}
   .grid-3{grid-template-columns:1fr}
   .grid-2{grid-template-columns:1fr}
@@ -1308,9 +1487,10 @@ tr:hover td{background:var(--bg3)}
 .mobile-nav-item.active{color:var(--accent)}
 .mobile-nav-item .mni{font-size:20px;line-height:1}
 .mobile-more-menu{
-  display:none;position:fixed;bottom:70px;left:0;right:0;
+  display:none;position:fixed;bottom:64px;left:0;right:0;
   background:var(--bg2);border-top:1px solid var(--border2);
   z-index:49;padding:8px 0;
+  box-shadow:0 -4px 16px rgba(0,0,0,0.12);
 }
 .mobile-more-menu.open{display:block}
 .mobile-more-item{
@@ -1391,20 +1571,15 @@ tr:hover td{background:var(--bg3)}
       <div class="switch-btn" onclick="switchComp()">⇄ Switch competition</div>
     </div>
     <div class="nav">
-      <div class="nav-section">Overview</div>
       <div class="nav-item active" data-page="dashboard" onclick="showPage('dashboard')"><span class="nav-icon">📊</span>Dashboard</div>
       <div class="nav-item" data-page="leaderboard" onclick="showPage('leaderboard')"><span class="nav-icon">🏆</span>Leaderboard</div>
       <div class="nav-item" data-page="prizes" onclick="showPage('prizes')"><span class="nav-icon">💰</span>Prize Pool</div>
-      <div class="nav-section">Competition</div>
-      <div class="nav-item" data-page="matchups" onclick="showPage('matchups')"><span class="nav-icon">⚔️</span>Weekly Matchups</div>
-      <div class="nav-item" data-page="weekly" onclick="showPage('weekly')"><span class="nav-icon">📉</span>Weekly Results</div>
+      <div class="nav-item" data-page="competition" onclick="showPage('competition')"><span class="nav-icon">⚔️</span>Competition</div>
       <div class="nav-item" data-page="submit" onclick="showPage('submit')"><span class="nav-icon">📥</span>Log Weigh-In</div>
-      <div class="nav-section">Me</div>
-      <div class="nav-item" data-page="progress" onclick="showPage('progress')"><span class="nav-icon">📈</span>My Progress</div>
-      <div class="nav-item" data-page="chat" onclick="showPage('chat')"><span class="nav-icon">💬</span>Social Hub</div>
-      <div class="nav-item" data-page="profile" onclick="showPage('profile')"><span class="nav-icon">👤</span>My Profile</div>
-      <div class="nav-section admin-only-nav">Admin</div>
+      <div class="nav-item" data-page="me" onclick="showPage('me')"><span class="nav-icon">👤</span>Me</div>
+      <div class="nav-item" data-page="chat" onclick="showPage('chat')"><span class="nav-icon">💬</span>Chat</div>
       <div class="nav-item admin-only-nav" data-page="admin" onclick="showPage('admin')"><span class="nav-icon">⚙️</span>Settings</div>
+      <div class="nav-item" onclick="toggleDarkMode()" id="theme-toggle"><span class="nav-icon" id="theme-icon">☀️</span><span id="theme-label">Light Mode</span></div>
     </div>
     <div class="nav-bottom">
       <div class="nav-user">
@@ -1467,27 +1642,39 @@ tr:hover td{background:var(--bg3)}
     </div>
 
     <!-- MATCHUPS -->
-    <div id="page-matchups" class="page">
-      <div class="page-header"><h2>⚔️ Head-to-Head Matchups</h2><p>Weekly round-robin — no-show means your opponent wins automatically</p></div>
-      <div class="week-selector">
-        <button class="week-nav" onclick="changeMatchupWeek(-1)">‹</button>
-        <span class="week-label" id="matchup-week-label">Week 1</span>
-        <button class="week-nav" onclick="changeMatchupWeek(1)">›</button>
-        <span class="tag">Round Robin</span>
+    <!-- COMPETITION PAGE — matchups + results combined -->
+    <div id="page-competition" class="page">
+      <div class="page-header"><h2>⚔️ Competition</h2><p>Matchups and weekly results</p></div>
+      <div class="tabs">
+        <div class="tab active" data-comptab="matchups" onclick="switchCompTab('matchups')">Matchups</div>
+        <div class="tab" data-comptab="results" onclick="switchCompTab('results')">Results</div>
       </div>
-      <div id="matchup-grid" class="grid-2"></div>
+
+      <!-- Matchups tab -->
+      <div id="comp-tab-matchups">
+        <div class="week-selector">
+          <button class="week-nav" onclick="changeMatchupWeek(-1)">‹</button>
+          <span class="week-label" id="matchup-week-label">Week 1</span>
+          <button class="week-nav" onclick="changeMatchupWeek(1)">›</button>
+          <span class="tag">Round Robin</span>
+        </div>
+        <div id="matchup-grid" class="grid-2"></div>
+      </div>
+
+      <!-- Results tab -->
+      <div id="comp-tab-results" style="display:none">
+        <div class="card mb-16"><div class="section-title">Weekly Biggest Losers <span class="line"></span></div>
+          <div class="table-wrap"><table><thead><tr><th>Week</th><th>Champion</th><th>% Lost</th><th>Prize</th><th></th></tr></thead><tbody id="wl-body"></tbody></table></div>
+        </div>
+        <div class="card"><div class="section-title">H2H Weekly Results <span class="line"></span></div>
+          <div class="table-wrap"><table><thead><tr><th>Week</th><th>Player 1</th><th>% Lost</th><th></th><th>% Lost</th><th>Player 2</th><th>Prize</th></tr></thead><tbody id="h2h-body"></tbody></table></div>
+        </div>
+      </div>
     </div>
 
-    <!-- WEEKLY RESULTS -->
-    <div id="page-weekly" class="page">
-      <div class="page-header"><h2>📉 Weekly Results</h2><p>Based on last weigh-in of each week</p></div>
-      <div class="card mb-16"><div class="section-title">Weekly Biggest Losers <span class="line"></span></div>
-        <div class="table-wrap"><table><thead><tr><th>Week</th><th>Champion</th><th>% Lost</th><th>Prize</th><th></th></tr></thead><tbody id="wl-body"></tbody></table></div>
-      </div>
-      <div class="card"><div class="section-title">H2H Weekly Results <span class="line"></span></div>
-        <div class="table-wrap"><table><thead><tr><th>Week</th><th>Player 1</th><th>% Lost</th><th></th><th>% Lost</th><th>Player 2</th><th>Prize</th></tr></thead><tbody id="h2h-body"></tbody></table></div>
-      </div>
-    </div>
+    <!-- Keep legacy pages hidden for any code that routes to them directly -->
+    <div id="page-matchups" class="page" style="display:none!important"></div>
+    <div id="page-weekly" class="page" style="display:none!important"></div>
 
     <!-- LOG WEIGH-IN -->
     <div id="page-submit" class="page">
@@ -1500,52 +1687,69 @@ tr:hover td{background:var(--bg3)}
           <div id="submit-comp-select-wrap" style="display:none">
             <div class="form-group"><label>Competitor (Admin)</label><select id="submit-comp-sel" onchange="onSubmitCompChange()"><option value="">Select competitor...</option></select></div>
           </div>
-          <div id="submit-first-notice" class="alert alert-info">👋 First weigh-in! This sets your starting weight for the competition.</div>
-          <div id="submit-unit-wrap" class="form-group">
-            <label>Weight Unit (set once)</label>
-            <select id="submit-unit"><option value="kg">Kilograms (kg)</option><option value="lbs">Pounds (lbs)</option></select>
+
+    <!-- ME PAGE — Progress + Profile combined with tabs -->
+    <div id="page-me" class="page">
+      <div class="page-header"><h2>👤 Me</h2><p>Your progress, profile and personal data</p></div>
+      <div class="tabs">
+        <div class="tab active" data-metab="progress" onclick="switchMeTab('progress')">📈 Progress</div>
+        <div class="tab" data-metab="profile" onclick="switchMeTab('profile')">👤 Profile</div>
+      </div>
+      <!-- Progress tab -->
+      <div id="me-tab-progress">
+        <div id="tracker-goal-section" class="mb-16"></div>
+        <div class="card mb-16">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:16px">
+            <div class="tabs" style="margin-bottom:0">
+              <div class="prog-tab tab active" data-mode="personal" onclick="setProgressMode('personal')">My Weight</div>
+              <div class="prog-tab tab" data-mode="compare" onclick="setProgressMode('compare')">Compare</div>
+            </div>
+            <div id="progress-compare-row" style="display:none">
+              <select id="progress-compare-sel" onchange="onCompareChange()" style="background:var(--bg3);border:1px solid var(--border);border-radius:9px;color:var(--text);padding:8px 12px;font-family:'DM Sans';font-size:13px;outline:none"><option value="">Choose a competitor...</option></select>
+            </div>
           </div>
-          <div class="form-row">
-            <div class="form-group"><label>Date</label><input type="date" id="submit-date"></div>
-            <div class="form-group"><label id="submit-weight-label">Your Weight (kg) — private</label><input type="number" id="submit-weight" step="0.1" placeholder="e.g. 84.5"></div>
+          <div style="position:relative;height:280px"><canvas id="progressChart"></canvas><div id="progress-chart-msg" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:13px">Log at least 2 weigh-ins to see your chart</div></div>
+          <div style="font-size:11px;color:var(--muted);margin-top:10px">Personal mode: all-time weight + trend (private). Compare mode: % lost vs a competitor.</div>
+        </div>
+        <div class="section-title">Competition Stats <span class="line"></span></div>
+        <div class="grid-3 mb-16" id="progress-stats-grid"></div>
+        <div class="section-title">My Earnings <span class="line"></span></div>
+        <div id="progress-earnings" class="mb-16"><div style="color:var(--muted);font-size:13px;padding:8px 0">No confirmed earnings yet.</div></div>
+        <div class="section-title">Achievements <span class="line"></span></div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px" id="progress-achievements"><div class="no-data" style="grid-column:1/-1;padding:24px"><div class="icon">🏅</div><p>Keep logging weigh-ins to earn badges!</p></div></div>
+      </div>
+      <!-- Profile tab -->
+      <div id="me-tab-profile" style="display:none">
+        <div class="grid-2 mb-16">
+          <div class="card">
+            <div class="section-title">Account <span class="line"></span></div>
+            <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px">
+              <div style="position:relative;width:64px;height:64px;flex-shrink:0">
+                <img id="profile-avatar-img" src="" style="display:none;width:64px;height:64px;border-radius:50%;object-fit:cover;border:2px solid rgba(255,255,255,0.1)">
+                <div id="profile-avatar-init" style="width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:'Syne';font-weight:800;font-size:22px;background:rgba(124,106,247,0.2);color:var(--accent)"></div>
+              </div>
+              <div>
+                <div style="font-family:'Syne';font-size:20px;font-weight:700" id="profile-name-display"></div>
+                <div style="color:var(--muted);font-size:13px" id="profile-email-display"></div>
+                <span class="badge badge-purple mt-8" id="profile-role-display"></span>
+              </div>
+            </div>
+            <div class="section-title" style="font-size:13px">Profile Photo <span class="line"></span></div>
+            <div id="profile-photo-alert"></div>
+            <div class="form-group"><label>Upload from device</label><input type="file" id="photo-file-input" accept="image/*" onchange="savePhotoFile()" style="background:var(--bg3);border:1px solid var(--border);border-radius:9px;color:var(--text);padding:8px 12px;font-size:13px;cursor:pointer"></div>
+            <div class="form-group"><label>Or paste a photo URL</label><div style="display:flex;gap:8px"><input type="url" id="photo-url-input" placeholder="https://..."><button class="btn btn-secondary btn-sm" onclick="savePhotoUrl()" style="margin-top:0;flex-shrink:0">Save</button></div></div>
           </div>
-          <button class="btn btn-primary" style="width:100%" onclick="submitWeighIn()">Save Weigh-In</button>
-          <p style="font-size:12px;color:var(--muted);margin-top:10px">You can log a weigh-in every day. Weekly % uses your last entry of each week. Once submitted, only admins can edit.</p>
+          <div class="card"><div id="profile-stats"><div class="no-data"><div class="icon">📊</div><p>No weigh-ins yet</p></div></div></div>
         </div>
         <div class="card">
-          <div class="section-title">How It Works <span class="line"></span></div>
-          <p style="color:var(--muted);font-size:13px;line-height:2">Just enter your <strong style="color:var(--text)">date</strong> and <strong style="color:var(--text)">current weight</strong>.<br><br>✅ Weigh in as often as you like — once a day<br>✅ Weekly % uses your <strong style="color:var(--text)">last weigh-in of that week</strong><br>✅ Total % is always vs your starting weight<br>⚠️ Miss a whole week and your H2H opponent wins by default<br><br><span style="color:var(--accent2)">Your actual weight is only visible to you and admins.</span></p>
+          <div class="section-title">Full Weigh-In History <span class="line"></span><span class="tag" style="margin-left:8px">Private</span></div>
+          <div class="table-wrap mt-16"><table><thead><tr><th>Date</th><th>Week</th><th>Weight</th><th>Total % Lost</th></tr></thead><tbody id="profile-history-body"></tbody></table></div>
         </div>
       </div>
-      <div class="card mt-24">
-        <div class="section-title">My Weigh-In History <span class="line"></span><span class="tag" style="margin-left:8px">Private</span></div>
-        <div class="table-wrap mt-16"><table><thead><tr><th>Date</th><th>Week</th><th>Weight</th><th>Weekly % Lost</th><th>Total % Lost</th><th></th></tr></thead><tbody id="submit-history-body"></tbody></table></div>
-      </div>
     </div>
-
-    <!-- MY PROGRESS -->
-    <div id="page-progress" class="page">
-      <div class="page-header"><h2>📈 My Progress</h2><p>Your personal journey — weights are private</p></div>
-      <div class="card mb-16">
-        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:16px">
-          <div class="tabs" style="margin-bottom:0">
-            <div class="prog-tab tab active" data-mode="personal" onclick="setProgressMode('personal')">My Weight</div>
-            <div class="prog-tab tab" data-mode="compare" onclick="setProgressMode('compare')">Compare</div>
-          </div>
-          <div id="progress-compare-row" style="display:none">
-            <select id="progress-compare-sel" onchange="onCompareChange()" style="background:var(--bg3);border:1px solid var(--border);border-radius:9px;color:var(--text);padding:8px 12px;font-family:'DM Sans';font-size:13px;outline:none"><option value="">Choose a competitor...</option></select>
-          </div>
-        </div>
-        <div style="position:relative;height:280px"><canvas id="progressChart"></canvas><div id="progress-chart-msg" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:13px">Log at least 2 weigh-ins to see your chart</div></div>
-        <div style="font-size:11px;color:var(--muted);margin-top:10px">Personal mode: actual weight + trend (private). Compare mode: % lost vs a competitor.</div>
-      </div>
-      <div class="section-title">Your Stats <span class="line"></span></div>
-      <div class="grid-3 mb-16" id="progress-stats-grid"></div>
-      <div class="section-title">My Earnings <span class="line"></span></div>
-      <div id="progress-earnings" class="mb-16"><div style="color:var(--muted);font-size:13px;padding:8px 0">No confirmed earnings yet.</div></div>
-      <div class="section-title">Achievements <span class="line"></span></div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px" id="progress-achievements"><div class="no-data" style="grid-column:1/-1;padding:24px"><div class="icon">🏅</div><p>Keep logging weigh-ins to earn badges!</p></div></div>
-    </div>
+    <!-- Legacy stubs -->
+    <div id="page-progress" class="page" style="display:none!important"></div>
+    <div id="page-profile" class="page" style="display:none!important"></div>
 
     <!-- CHAT -->
     <div id="page-chat" class="page">
@@ -1563,36 +1767,6 @@ tr:hover td{background:var(--bg3)}
           <div class="card mb-16"><div class="section-title">Leaderboard Snapshot <span class="line"></span></div><div id="chat-leaderboard-snap" class="mt-8"></div></div>
           <div class="card"><div class="section-title">Motivation <span class="line"></span></div><div style="padding:16px;text-align:center"><div style="font-size:32px;margin-bottom:10px" id="motivation-emoji">🔥</div><p style="font-size:14px;line-height:1.7;color:rgba(240,240,244,0.8);font-style:italic" id="motivation-quote">"The secret of getting ahead is getting started."</p></div></div>
         </div>
-      </div>
-    </div>
-
-    <!-- PROFILE -->
-    <div id="page-profile" class="page">
-      <div class="page-header"><h2>👤 My Profile</h2><p>Your personal data — weights visible only to you</p></div>
-      <div class="grid-2 mb-16">
-        <div class="card">
-          <div class="section-title">Account <span class="line"></span></div>
-          <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px">
-            <div style="position:relative;width:64px;height:64px;flex-shrink:0">
-              <img id="profile-avatar-img" src="" style="display:none;width:64px;height:64px;border-radius:50%;object-fit:cover;border:2px solid rgba(255,255,255,0.1)">
-              <div id="profile-avatar-init" style="width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:'Syne';font-weight:800;font-size:22px;background:rgba(124,106,247,0.2);color:var(--accent)"></div>
-            </div>
-            <div>
-              <div style="font-family:'Syne';font-size:20px;font-weight:700" id="profile-name-display"></div>
-              <div style="color:var(--muted);font-size:13px" id="profile-email-display"></div>
-              <span class="badge badge-purple mt-8" id="profile-role-display"></span>
-            </div>
-          </div>
-          <div class="section-title" style="font-size:13px">Profile Photo <span class="line"></span></div>
-          <div id="profile-photo-alert"></div>
-          <div class="form-group"><label>Upload from device</label><input type="file" id="photo-file-input" accept="image/*" onchange="savePhotoFile()" style="background:var(--bg3);border:1px solid var(--border);border-radius:9px;color:var(--text);padding:8px 12px;font-size:13px;cursor:pointer"></div>
-          <div class="form-group"><label>Or paste a photo URL</label><div style="display:flex;gap:8px"><input type="url" id="photo-url-input" placeholder="https://..."><button class="btn btn-secondary btn-sm" onclick="savePhotoUrl()" style="margin-top:0;flex-shrink:0">Save</button></div></div>
-        </div>
-        <div class="card"><div id="profile-stats"><div class="no-data"><div class="icon">📊</div><p>No weigh-ins yet</p></div></div></div>
-      </div>
-      <div class="card">
-        <div class="section-title">Full Weigh-In History <span class="line"></span><span class="tag" style="margin-left:8px">Private</span></div>
-        <div class="table-wrap mt-16"><table><thead><tr><th>Date</th><th>Week</th><th>Weight</th><th>Total % Lost</th></tr></thead><tbody id="profile-history-body"></tbody></table></div>
       </div>
     </div>
 
@@ -1654,34 +1828,41 @@ tr:hover td{background:var(--bg3)}
 
   </main>
 
-  <!-- MOBILE BOTTOM NAV -->
+  <!-- MOBILE BOTTOM NAV — 7 items max, no overflow menu needed -->
   <nav class="mobile-nav" id="mobile-nav">
     <div class="mobile-nav-item active" data-page="dashboard" onclick="mobileNav('dashboard')">
-      <span class="mni">📊</span>Dashboard
+      <span class="mni">📊</span>Home
     </div>
     <div class="mobile-nav-item" data-page="leaderboard" onclick="mobileNav('leaderboard')">
       <span class="mni">🏆</span>Ranks
     </div>
+    <div class="mobile-nav-item" data-page="competition" onclick="mobileNav('competition')">
+      <span class="mni">⚔️</span>Compete
+    </div>
     <div class="mobile-nav-item" data-page="submit" onclick="mobileNav('submit')">
       <span class="mni">📥</span>Log
     </div>
-    <div class="mobile-nav-item" data-page="progress" onclick="mobileNav('progress')">
-      <span class="mni">📈</span>Progress
+    <div class="mobile-nav-item" data-page="me" onclick="mobileNav('me')">
+      <span class="mni">👤</span>Me
     </div>
-    <div class="mobile-nav-item" onclick="toggleMoreMenu()">
-      <span class="mni">☰</span>More
+    <div class="mobile-nav-item" data-page="chat" onclick="mobileNav('chat')">
+      <span class="mni">💬</span>Chat
+    </div>
+    <div class="mobile-nav-item" onclick="showMobileMenu()">
+      <span class="mni" id="mobile-more-icon">⋯</span>More
     </div>
   </nav>
 
-  <!-- MOBILE MORE MENU -->
+  <!-- MOBILE SLIDE-UP MENU — prizes, admin, theme, sign out -->
   <div class="mobile-more-menu" id="mobile-more-menu">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 20px 4px;border-bottom:1px solid var(--border)">
+      <span style="font-family:Syne,sans-serif;font-weight:700;font-size:14px">More</span>
+      <button onclick="toggleMoreMenu(false)" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:4px">×</button>
+    </div>
     <div class="mobile-more-item" data-page="prizes" onclick="mobileNav('prizes')"><span class="mni">💰</span>Prize Pool</div>
-    <div class="mobile-more-item" data-page="matchups" onclick="mobileNav('matchups')"><span class="mni">⚔️</span>Weekly Matchups</div>
-    <div class="mobile-more-item" data-page="weekly" onclick="mobileNav('weekly')"><span class="mni">📉</span>Weekly Results</div>
-    <div class="mobile-more-item" data-page="chat" onclick="mobileNav('chat')"><span class="mni">💬</span>Social Hub</div>
-    <div class="mobile-more-item" data-page="profile" onclick="mobileNav('profile')"><span class="mni">👤</span>My Profile</div>
     <div class="mobile-more-item admin-only-nav" data-page="admin" onclick="mobileNav('admin')"><span class="mni">⚙️</span>Settings</div>
-    <div class="mobile-more-item" onclick="switchComp();toggleMoreMenu()"><span class="mni">⇄</span>Switch Competition</div>
+    <div class="mobile-more-item" onclick="toggleDarkMode();toggleMoreMenu(false)"><span class="mni" id="mobile-theme-icon">☀️</span><span id="mobile-theme-label">Light Mode</span></div>
+    <div class="mobile-more-item" onclick="switchComp();toggleMoreMenu(false)"><span class="mni">⇄</span>Switch Competition</div>
     <div class="mobile-more-item" onclick="doSignOut()"><span class="mni">⏻</span>Sign Out</div>
   </div>
 
@@ -1697,6 +1878,57 @@ tr:hover td{background:var(--bg3)}
 })();
 </script>
 <script>
+// ── DARK MODE ────────────────────────────────────────────────
+function applyTheme(dark) {
+  document.documentElement.classList.toggle('dark-mode', dark);
+  var icon  = dark ? '🌙' : '☀️';
+  var label = dark ? 'Dark Mode' : 'Light Mode';
+  var ti=$('theme-icon'), tl=$('theme-label'), mti=$('mobile-theme-icon'), mtl=$('mobile-theme-label');
+  if(ti)  ti.textContent  = icon;
+  if(tl)  tl.textContent  = label;
+  if(mti) mti.textContent = icon;
+  if(mtl) mtl.textContent = label;
+}
+function toggleDarkMode() {
+  var isDark = document.documentElement.classList.contains('dark-mode');
+  var newDark = !isDark;
+  localStorage.setItem('wb-theme', newDark ? 'dark' : 'light');
+  applyTheme(newDark);
+}
+window.toggleDarkMode = toggleDarkMode;
+// Theme is applied by the <head> script before render.
+// We just need to sync the toggle button labels after the DOM is ready.
+
+// ── COMP TAB SWITCHING ───────────────────────────────────────
+window.switchCompTab = function(tab) {
+  document.querySelectorAll('[data-comptab]').forEach(function(t) {
+    t.classList.toggle('active', t.dataset.comptab === tab);
+  });
+  var mt=$('comp-tab-matchups'), rt=$('comp-tab-results');
+  if(mt) mt.style.display = tab==='matchups' ? '' : 'none';
+  if(rt) rt.style.display = tab==='results'  ? '' : 'none';
+  if(tab === 'matchups') renderMatchupWeek();
+  if(tab === 'results')  renderWeeklyResults();
+};
+
+// ── ME TAB SWITCHING ─────────────────────────────────────────
+window.switchMeTab = function(tab) {
+  document.querySelectorAll('[data-metab]').forEach(function(t) {
+    t.classList.toggle('active', t.dataset.metab === tab);
+  });
+  var pp=$('me-tab-progress'), pf=$('me-tab-profile');
+  if(pp) pp.style.display = tab==='progress' ? '' : 'none';
+  if(pf) pf.style.display = tab==='profile'  ? '' : 'none';
+  if(tab === 'progress') renderProgressPage();
+  if(tab === 'profile')  renderProfilePage();
+};
+
+// ── SHOW MOBILE MENU ─────────────────────────────────────────
+window.showMobileMenu = function() {
+  var menu = document.getElementById('mobile-more-menu');
+  if(menu) menu.classList.toggle('open');
+};
+
 // Mobile navigation
 function mobileNav(page) {
   toggleMoreMenu(false);
