@@ -125,15 +125,22 @@ let feedPosts      = [];   // friends feed posts
 let activeDMId     = null;
 let activeGroupId  = null;
 let socialTab      = null;   // deprecated — use currentSubTab.social instead
-// (super admin panel removed)
+// Super admin panel state
+let saAllComps     = [];
+let saAllUsers     = [];
+let saViewingComp  = null;   // competition currently being ghost-viewed
+let saGhostUid     = null;   // when set, app renders as if this uid is the logged-in user
+let saCurrentTab   = 'overview';
 
 // ════════════════════════════════════════════════════════════
 // ROLE HELPERS
 // ════════════════════════════════════════════════════════════
 
-const isSuperAdmin = () => false;
-const viewingUid = () => currentUser?.uid;
-const isCompAdmin  = () => compMembership?.role === 'admin';
+const isSuperAdmin = () => userProfile?.role === 'superAdmin' && !compMembership?.userView;
+const isTrueSuperAdmin = () => userProfile?.role === 'superAdmin';
+// viewingUid: returns ghost uid when SA is viewing as a specific user, otherwise own uid
+const viewingUid = () => (saGhostUid && compMembership?.userView) ? saGhostUid : currentUser?.uid;
+const isCompAdmin  = () => compMembership?.role === 'admin' || isSuperAdmin();
 const $ = id => document.getElementById(id);
 window.$ = $; // expose to non-module scripts
 window.$ = $; // expose to non-module scripts and inline onclick handlers
@@ -693,7 +700,7 @@ function startListeners() {
       var dt=$('dash-title');if(dt)dt.textContent=currentComp.name||'WeighBet';
       var ic=$('admin-invite-code-display');if(ic)ic.textContent=currentComp.inviteCode||'-';
       // Show suspension notice if competition is suspended
-      if(currentComp.suspended) {
+      if(currentComp.suspended && !isSuperAdmin()) {
         showScreen('comp-select-screen');
         $('comp-list').innerHTML='<div style="text-align:center;padding:32px 20px"><div style="font-size:40px;margin-bottom:12px">🚫</div><div style="font-family:Syne,sans-serif;font-weight:700;font-size:18px;margin-bottom:8px">Competition Suspended</div><div style="color:var(--muted);font-size:14px">This competition has been temporarily suspended. Please contact the organiser for more information.</div></div>';
         return;
@@ -724,7 +731,12 @@ function startListeners() {
     var wasAdmin=compMembership?.role==='admin';
     compMembership=me||null;
     updateNavForRole();
-    // (SA all-weighins listener removed)
+    // Super admin sees all weighins; regular users see own only
+    if(isTrueSuperAdmin()&&currentCompId&&!compMembership?.userView){
+      var adminQ=collection(db,'competitions',currentCompId,'weighins');
+      var saWiUnsub=onSnapshot(adminQ,snap=>{allWeighIns=snap.docs.map(d=>({id:d.id,...d.data()}));refreshCurrentPage();});
+      unsubs.push(saWiUnsub);
+    }
     refreshCurrentPage();
   }));
 
@@ -826,16 +838,16 @@ async function loadMyCompetitions() {
 // AUTH UI
 // ════════════════════════════════════════════════════════════
 function showScreen(id) {
-  ['auth-screen','reset-password-screen','comp-select-screen','app-shell'].forEach(s=>{
+  ['auth-screen','reset-password-screen','comp-select-screen','app-shell','super-admin-panel'].forEach(s=>{
     var el=$(s); if(el)el.style.display='none';
   });
   var target=$(id);
-  if(target) target.style.display = (id==='app-shell')?'grid':'flex';
+  if(target) target.style.display = (id==='app-shell')?'grid':(id==='super-admin-panel')?'block':'flex';
 }
 
 function updateNavForRole() {
   document.querySelectorAll('.admin-only-nav').forEach(el=>{ el.style.display=isCompAdmin()?'':'none'; });
-  document.querySelectorAll('.super-admin-only').forEach(el=>{ el.style.display='none'; });
+  document.querySelectorAll('.super-admin-only').forEach(el=>{ el.style.display=isSuperAdmin()?'':'none'; });
   // Sync main tab active state
   document.querySelectorAll('.nav-item[data-tab]').forEach(function(n){ n.classList.toggle('active',n.dataset.tab===currentPage); });
   document.querySelectorAll('.mobile-nav-item[data-tab]').forEach(function(n){ n.classList.toggle('active',n.dataset.tab===currentPage); });
@@ -852,8 +864,8 @@ function updateNavForRole() {
       navInit.style.color=getAvatarColor(name);
     }
     $('nav-user-name').textContent=name;
-    $('nav-admin-badge').style.display=isCompAdmin()?'inline-flex':'none';
-    $('nav-admin-badge').textContent='Admin';
+    $('nav-admin-badge').style.display=isSuperAdmin()?'inline-flex':isCompAdmin()?'inline-flex':'none';
+    $('nav-admin-badge').textContent=isSuperAdmin()?'Super Admin':'Admin';
   }
   var compNameEl=$('nav-comp-name');
   if(compNameEl)compNameEl.textContent=currentComp?.name||'';
@@ -2116,11 +2128,11 @@ function renderSubmitPage(){
   $('submit-cur-week').textContent=getCurrentWeek();
   var selWrap=$('submit-comp-select-wrap');
   if(!selWrap)return;
-  selWrap.style.display = isCompAdmin() ? '' : 'none';
-  if(isCompAdmin()) {
+  if(isSuperAdmin()){
+    selWrap.style.display='';
     var prevSel=$('submit-comp-sel').value;
     $('submit-comp-sel').innerHTML='<option value="">Select competitor...</option>'+competitors.map(c=>'<option value="'+c.uid+'"'+(c.uid===prevSel?' selected':'')+'>'+c.displayName+'</option>').join('');
-  }
+  } else { selWrap.style.display='none'; }
   var targetUid=(isCompAdmin()&&($('submit-comp-sel')?.value||window._selectedCompUid))?($('submit-comp-sel')?.value||window._selectedCompUid):currentUser?.uid;
   var wi=userWeighIns(targetUid), sw=wi.length?wi[0]:null, unit=sw?.unit||'kg', isFirst=wi.length===0;
   var sfn=$('submit-first-notice'), suw=$('submit-unit-wrap'), swl=$('submit-weight-label'), sd=$('submit-date');
@@ -2141,7 +2153,7 @@ function renderSubmitPage(){
   var paged=filtered.slice(histPage*PAGE_SIZE,(histPage+1)*PAGE_SIZE);
   shb.innerHTML=paged.map(function(e){
     var wn=dateToWeek(e.date), wpct=wn?weeklyPctLost(targetUid,wn):null, tpct=sw?((sw.weight-e.weight)/sw.weight*100):0;
-    return'<tr><td>'+fmtDate(e.date)+'</td><td>'+(wn?'Week '+wn:'-')+'</td><td style="color:var(--text);font-weight:500">'+e.weight.toFixed(1)+' '+(e.unit||'kg')+'</td><td style="color:'+(wpct!=null&&wpct>=0?'var(--success)':'var(--danger)')+';font-weight:700">'+(wpct!=null?fmtPct(wpct):'-')+'</td><td style="color:var(--accent2);font-weight:700">'+(e===sw?'Starting':(tpct>=0?fmtPct(tpct):'+'+Math.abs(tpct).toFixed(2)+'%'))+'</td><td>'+(isCompAdmin()?'<button class="btn btn-danger btn-sm" data-eid="'+e.id+'" onclick="adminDeleteWeighIn(this.dataset.eid)" title="Delete">🗑️</button>':'')+'</td></tr>';
+    return'<tr><td>'+fmtDate(e.date)+'</td><td>'+(wn?'Week '+wn:'-')+'</td><td style="color:var(--text);font-weight:500">'+e.weight.toFixed(1)+' '+(e.unit||'kg')+'</td><td style="color:'+(wpct!=null&&wpct>=0?'var(--success)':'var(--danger)')+';font-weight:700">'+(wpct!=null?fmtPct(wpct):'-')+'</td><td style="color:var(--accent2);font-weight:700">'+(e===sw?'Starting':(tpct>=0?fmtPct(tpct):'+'+Math.abs(tpct).toFixed(2)+'%'))+'</td><td>'+(isSuperAdmin()?'<button class="btn btn-danger btn-sm" data-eid="'+e.id+'" onclick="adminDeleteWeighIn(this.dataset.eid)" title="Delete">🗑️</button>':'')+'</td></tr>';
   }).join('')||'<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:32px">No weigh-ins yet!</td></tr>';
   var pgEl=$('history-pagination');
   if(pgEl){
@@ -2204,15 +2216,15 @@ window.submitWeighIn=async function(){
   if(!currentCompId){showAlert('submit-alert','No competition selected','danger');return;}
   var dateVal=$('submit-date').value, weightVal=parseFloat($('submit-weight').value);
   if(!dateVal||isNaN(weightVal)||weightVal<=0){showAlert('submit-alert','Please enter a valid date and weight','danger');return;}
-  var targetUid=(isCompAdmin()&&($('submit-comp-sel')?.value||window._selectedCompUid))?($('submit-comp-sel')?.value||window._selectedCompUid):currentUser.uid;
+  var targetUid=(isSuperAdmin()&&($('submit-comp-sel')?.value||window._selectedCompUid))?($('submit-comp-sel')?.value||window._selectedCompUid):currentUser.uid;
   var wi=userWeighIns(targetUid), isFirst=wi.length===0;
   var unit=isFirst?($('submit-unit')?.value||'kg'):(wi[0].unit||'kg');
   var dupEntry=wi.find(e=>e.date===dateVal);
-  if(dupEntry&&!isCompAdmin()){showAlert('submit-alert','You already have an entry for this date. Contact admin to edit.','danger');return;}
+  if(dupEntry&&!isSuperAdmin()){showAlert('submit-alert','You already have an entry for this date. Contact admin to edit.','danger');return;}
   var week=dateToWeek(dateVal);
   try{
     var data={userId:targetUid,date:dateVal,weight:weightVal,unit,week,ts:serverTimestamp()};
-    if(dupEntry&&isCompAdmin()){await updateDoc(doc(db,'competitions',currentCompId,'weighins',dupEntry.id),data);}
+    if(dupEntry&&isSuperAdmin()){await updateDoc(doc(db,'competitions',currentCompId,'weighins',dupEntry.id),data);}
     else{await addDoc(collection(db,'competitions',currentCompId,'weighins'),data);}
     // Write to personal tracker
     var personalRef = doc(db,'users',targetUid,'weighins',dateVal);
@@ -2233,7 +2245,7 @@ window.submitWeighIn=async function(){
   }catch(e){showAlert('submit-alert',e.message,'danger');}
 };
 window.adminDeleteWeighIn=async function(id){
-  if(!isCompAdmin())return;
+  if(!isSuperAdmin())return;
   if(!confirm('Delete this weigh-in entry?'))return;
   // Find the userId before deleting so we can update public stats
   var entry = allWeighIns.find(function(e){ return e.id === id; });
@@ -2374,8 +2386,12 @@ function renderProgressPage(){
   // ── TRACKER GOAL SECTION ─────────────────────────────────
   // When ghosting as another user, don't show their personal tracker/goal data
   // (we don't have access to it — only their competition data is visible to SA)
-  var goal = trackerGoal;
+  var goal = saGhostUid ? null : trackerGoal;
   var goalEl = $('tracker-goal-section');
+  if(saGhostUid && goalEl) {
+    goalEl.innerHTML = '<div class="card mb-16" style="text-align:center;padding:20px;color:var(--muted);font-size:13px"><div style="font-size:24px;margin-bottom:8px">🔒</div><strong style="color:var(--text);display:block;margin-bottom:6px">Personal tracker data is private</strong>Height, weight goals and body measurements are only visible to the user themselves.</div>';
+    goalEl = null;
+  }
   if (goalEl) {
     var curWeight = allWI.length ? allWI[allWI.length-1].weight : null;
     var targetW   = goal?.targetWeight || null;
@@ -2576,8 +2592,9 @@ function downsampleWeekly(wi) {
 function renderProgressChart(){
   if(!$('progressChart'))return;
   var uid = viewingUid();
-  var allWI = (personalWeighIns.length > 0 ? personalWeighIns : userWeighIns(uid))
-    .slice().sort(function(a,b){ return a.date.localeCompare(b.date); });
+  var isGhosting = saGhostUid && compMembership?.userView;
+  var allWI = isGhosting ? userWeighIns(uid) : (personalWeighIns.length > 0 ? personalWeighIns : userWeighIns(uid));
+  allWI = allWI.slice().sort(function(a,b){ return a.date.localeCompare(b.date); });
 
   if(progressChart){ progressChart.destroy(); progressChart = null; }
 
@@ -2661,16 +2678,18 @@ window.setPersonalPeriod = function(p) {
 // ════════════════════════════════════════════════════════════
 function renderProfilePage(){
   if(!$('profile-name-display'))return;
+  var isGhosting = saGhostUid && compMembership?.userView;
   var uid = viewingUid();
-  var name = userProfile?.displayName||'';
-  var email = currentUser?.email||'';
-  var role = isCompAdmin()?'Admin':'Competitor';
+  var ghostComp = isGhosting ? competitors.find(function(c){ return c.uid===uid; }) : null;
+  var name = ghostComp ? (ghostComp.displayName||'Unknown') : (userProfile?.displayName||'');
+  var email = ghostComp ? (ghostComp.email||'') : (currentUser?.email||'');
+  var role = ghostComp ? (ghostComp.role==='admin'?'Admin':'Competitor') : (isSuperAdmin()?'Super Admin':isCompAdmin()?'Admin':'Competitor');
 
   $('profile-name-display').textContent=name;
-  $('profile-email-display').textContent=email;
+  $('profile-email-display').textContent=isGhosting ? '(email hidden)' : email;
   $('profile-role-display').textContent=role;
-  var dni=$('display-name-input'); if(dni&&!dni.value) dni.value=name;
-  var photo = userProfile?.photoUrl || null;
+  var dni=$('display-name-input'); if(dni&&!dni.value&&!isGhosting) dni.value=name;
+  var photo = ghostComp?.photoUrl || (isGhosting ? null : userProfile?.photoUrl);
   var photoEl=$('profile-avatar-img'),initEl=$('profile-avatar-init');
   if(photoEl&&initEl){if(photo){photoEl.src=photo;photoEl.style.display='';initEl.style.display='none';}else{photoEl.style.display='none';initEl.style.display='';initEl.textContent=name.split(' ').map(function(w){return w[0];}).join('').substring(0,2).toUpperCase();}}
 
@@ -2775,6 +2794,311 @@ window.savePhotoFile = async function() {
 };
 
 
+// ════════════════════════════════════════════════════════════
+// SUPER ADMIN PANEL
+// ════════════════════════════════════════════════════════════
+async function loadSuperAdminData() {
+  var el = $('sa-content');
+  if(el) el.innerHTML = '<div style="color:#9090a0;font-size:13px;padding:20px 0">⏳ Loading platform data...</div>';
+  if(saCurrentTab==='users') { await loadSAUsers(); } else { await loadSAComps(); }
+}
+
+async function loadSAComps() {
+  try {
+    var indexSnap = await getDocs(collection(db,'competitionMembers'));
+    var compIds = [], seen = {};
+    indexSnap.docs.forEach(function(d) {
+      var cid = d.data().compId;
+      if(cid && !seen[cid]) { seen[cid] = true; compIds.push(cid); }
+    });
+    saAllComps = await Promise.all(compIds.map(async function(cid) {
+      try {
+        var compDoc = await getDoc(doc(db,'competitions',cid));
+        if(!compDoc.exists()) return null;
+        var data = {id:cid, ...compDoc.data()};
+        var memSnap = await getDocs(collection(db,'competitions',cid,'members'));
+        data.memberCount = memSnap.size;
+        data.members = memSnap.docs.map(function(m){ return {uid:m.id,...m.data()}; });
+        var wiSnap = await getDocs(collection(db,'competitions',cid,'weighins'));
+        data.weighInCount = wiSnap.size;
+        return data;
+      } catch(e) { console.warn('Could not load comp '+cid+':', e); return null; }
+    }));
+    saAllComps = saAllComps.filter(Boolean);
+    saAllComps.sort(function(a,b){ return (b.memberCount||0)-(a.memberCount||0); });
+    renderSAPanel();
+  } catch(e) {
+    var el = $('sa-content');
+    if(el) el.innerHTML = '<div style="color:#e05252;font-size:13px;padding:20px 0">❌ Error: ' + e.message + '<br><br><button onclick="loadSAComps()" style="background:rgba(124,106,247,0.2);color:#a99af9;border:none;border-radius:8px;padding:7px 14px;font-size:13px;cursor:pointer">🔄 Retry</button></div>';
+  }
+}
+
+async function loadSAUsers() {
+  try {
+    var snap = await getDocs(collection(db,'users'));
+    saAllUsers = snap.docs.map(function(d){ return {uid:d.id,...d.data()}; });
+    saAllUsers.sort(function(a,b){ return (a.displayName||'').localeCompare(b.displayName||''); });
+    renderSAPanel();
+  } catch(e) {
+    var el = $('sa-content');
+    if(el) el.innerHTML = '<div style="color:#e05252;font-size:13px;padding:20px 0">❌ Error loading users: ' + e.message + '</div>';
+  }
+}
+
+function renderSAPanel() {
+  var panel = $('super-admin-panel'); if(!panel) return;
+  document.querySelectorAll('[data-satab]').forEach(function(t){
+    t.classList.toggle('active', t.dataset.satab === saCurrentTab);
+  });
+  if(saCurrentTab==='overview')     renderSAOverview();
+  if(saCurrentTab==='competitions') renderSAComps();
+  if(saCurrentTab==='users')        renderSAUsers();
+  if(saCurrentTab==='bugs')         renderSABugs();
+}
+window.renderSAPanel = renderSAPanel;
+
+var saBugReports = [];
+
+async function loadSABugs() {
+  try {
+    var snap = await getDocs(query(collection(db,'bugReports'), orderBy('ts','desc')));
+    saBugReports = snap.docs.map(function(d){ return {id:d.id,...d.data()}; });
+    var open = saBugReports.filter(function(b){ return b.status !== 'resolved'; }).length;
+    var badge = $('sa-bug-badge');
+    if(badge){ badge.textContent = open; badge.style.display = open > 0 ? 'inline-flex' : 'none'; }
+    renderSABugs();
+  } catch(e) {
+    var el = $('sa-content');
+    if(el) el.innerHTML = '<div style="color:#e05252;font-size:13px;padding:20px 0">Error loading bug reports: ' + e.message + '</div>';
+  }
+}
+
+function renderSABugs() {
+  var el = $('sa-content'); if(!el) return;
+  var open   = saBugReports.filter(function(b){ return b.status !== 'resolved'; });
+  var closed = saBugReports.filter(function(b){ return b.status === 'resolved'; });
+  el.innerHTML =
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">' +
+      '<h3 style="font-family:Syne,sans-serif;font-weight:700;font-size:18px">Bug Reports (' + open.length + ' open)</h3>' +
+      '<button onclick="loadSABugs()" style="background:rgba(124,106,247,0.2);color:#a99af9;border:none;border-radius:8px;padding:7px 14px;font-size:13px;cursor:pointer">🔄 Refresh</button>' +
+    '</div>' +
+    (open.length === 0 && closed.length === 0 ? '<div style="color:#888;font-size:14px;padding:40px 0;text-align:center">No bug reports yet 🎉</div>' : '') +
+    open.map(function(b){ return saBugRow(b); }).join('') +
+    (closed.length > 0 ? '<div style="margin-top:24px;margin-bottom:12px;font-size:12px;text-transform:uppercase;letter-spacing:0.8px;color:#666;font-weight:600">Resolved (' + closed.length + ')</div>' + closed.map(function(b){ return saBugRow(b); }).join('') : '');
+}
+
+function saBugRow(b) {
+  var isResolved = b.status === 'resolved';
+  var ts = b.ts?.toDate ? b.ts.toDate() : new Date(b.ts||0);
+  var dateStr = ts.toLocaleDateString() + ' ' + ts.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  var sevColor = b.severity==='critical'?'#e05252':b.severity==='major'?'#f7b26a':'#9090a0';
+  var hasNote = b.adminNote && b.adminNote.trim();
+  var noteHtml =
+    '<div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.07)">' +
+    (hasNote ? '<div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:8px"><span style="font-size:16px;flex-shrink:0">📬</span><div style="flex:1;min-width:0"><div style="font-size:11px;font-weight:600;color:#a99af9;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px">Note to user' + (b.adminNoteRead ? ' <span style="color:#5fd4b3">· seen ✓</span>' : ' <span style="color:#f7b26a">· unread</span>') + '</div><div style="font-size:13px;color:#c0c0cc;line-height:1.5">' + b.adminNote.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div></div><button data-bid="'+b.id+'" onclick="saBugClearNote(this.dataset.bid)" style="background:none;border:none;color:#666;cursor:pointer;font-size:14px;flex-shrink:0;padding:0 4px">×</button></div>' : '') +
+    '<div id="bug-note-wrap-'+b.id+'" style="'+(hasNote?'display:none':'display:flex')+';gap:6px;align-items:flex-end"><textarea id="bug-note-'+b.id+'" placeholder="Write a note to this user..." rows="2" style="flex:1;background:#141418;border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#f0f0f4;padding:8px 10px;font-family:DM Sans,sans-serif;font-size:13px;outline:none;resize:none"></textarea><button data-bid="'+b.id+'" onclick="saBugSendNote(this.dataset.bid)" style="background:rgba(124,106,247,0.2);color:#a99af9;border:1px solid rgba(124,106,247,0.3);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer;white-space:nowrap">📨 Send</button></div>' +
+    (hasNote ? '<button onclick="var w=document.getElementById(\'bug-note-wrap-\'+this.dataset.bid);if(w)w.style.display=w.style.display===\'none\'?\'flex\':\'none\'" data-bid="'+b.id+'" style="background:none;border:none;color:#666;cursor:pointer;font-size:12px;padding:4px 0">✏️ Edit note</button>' : '') +
+    '</div>';
+  return '<div style="background:#1e1e24;border:1px solid rgba(255,255,255,'+(isResolved?'0.04':'0.1')+');border-radius:10px;padding:16px;margin-bottom:10px;opacity:'+(isResolved?'0.6':'1')+'">' +
+    '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px"><div style="flex:1;min-width:0"><div style="font-weight:600;font-size:14px;color:#f0f0f4;margin-bottom:4px">'+(b.title||'Untitled')+'</div><div style="font-size:13px;color:#9090a0;line-height:1.5">'+(b.description||'No description')+'</div></div><span style="font-size:11px;padding:3px 9px;border-radius:99px;background:'+sevColor+'22;color:'+sevColor+';flex-shrink:0;font-weight:600">'+(b.severity||'minor')+'</span></div>' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px"><div style="font-size:11px;color:#666">👤 '+(b.userName||'Unknown')+(b.compName?' · 🏆 '+b.compName:'')+' · 🕐 '+dateStr+(b.appVersion?' · v'+b.appVersion:'')+'</div>' +
+    '<div style="display:flex;gap:6px">'+(!isResolved?'<button data-bid="'+b.id+'" onclick="saBugResolve(this.dataset.bid)" style="background:rgba(95,212,179,0.15);color:#5fd4b3;border:none;border-radius:7px;padding:5px 12px;font-size:12px;cursor:pointer">✅ Resolve</button>':'<button data-bid="'+b.id+'" onclick="saBugReopen(this.dataset.bid)" style="background:rgba(247,178,106,0.15);color:#f7b26a;border:none;border-radius:7px;padding:5px 12px;font-size:12px;cursor:pointer">↩ Reopen</button>')+'<button data-bid="'+b.id+'" onclick="saBugDelete(this.dataset.bid)" style="background:rgba(224,82,82,0.15);color:#e05252;border:none;border-radius:7px;padding:5px 12px;font-size:12px;cursor:pointer">🗑️</button></div></div>' +
+    noteHtml + '</div>';
+}
+
+window.saBugResolve = async function(id) { await updateDoc(doc(db,'bugReports',id), {status:'resolved', resolvedAt:serverTimestamp()}); await loadSABugs(); };
+window.saBugReopen  = async function(id) { await updateDoc(doc(db,'bugReports',id), {status:'open', resolvedAt:null}); await loadSABugs(); };
+window.saBugDelete  = async function(id) { if(!confirm('Delete permanently?')) return; await deleteDoc(doc(db,'bugReports',id)); await loadSABugs(); };
+window.saBugSendNote = async function(id) {
+  var ta = $('bug-note-'+id); var note = ta ? ta.value.trim() : '';
+  if(!note) return;
+  await updateDoc(doc(db,'bugReports',id), {adminNote:note, adminNoteRead:false, adminNoteTs:serverTimestamp()});
+  await loadSABugs();
+};
+window.saBugClearNote = async function(id) {
+  if(!confirm('Remove this note?')) return;
+  await updateDoc(doc(db,'bugReports',id), {adminNote:null, adminNoteRead:null, adminNoteTs:null});
+  await loadSABugs();
+};
+
+window.switchSATab = async function(tab) {
+  saCurrentTab = tab;
+  var el = $('sa-content');
+  if(tab==='competitions' && saAllComps.length===0) { if(el) el.innerHTML='<div style="color:#9090a0;font-size:13px;padding:20px 0">⏳ Loading...</div>'; await loadSAComps(); }
+  else if(tab==='users' && saAllUsers.length===0)   { if(el) el.innerHTML='<div style="color:#9090a0;font-size:13px;padding:20px 0">⏳ Loading...</div>'; await loadSAUsers(); }
+  else if(tab==='bugs')                              { if(el) el.innerHTML='<div style="color:#9090a0;font-size:13px;padding:20px 0">⏳ Loading...</div>'; await loadSABugs(); }
+  else renderSAPanel();
+  document.querySelectorAll('[data-satab]').forEach(function(t){ t.classList.toggle('active', t.dataset.satab===tab); });
+};
+
+window.saGoToMyComps = async function() {
+  await loadMyCompetitions();
+  if(myCompetitions.length===1) { await joinCompetition(myCompetitions[0].compId); }
+  else { showScreen('comp-select-screen'); renderCompSelectScreen(); }
+};
+
+function renderSAOverview() {
+  var el = $('sa-content'); if(!el) return;
+  var totalComps = saAllComps.length;
+  var totalMembers = saAllComps.reduce(function(s,c){ return s+(c.memberCount||0); },0);
+  var totalWI = saAllComps.reduce(function(s,c){ return s+(c.weighInCount||0); },0);
+  var activeComps = saAllComps.filter(function(c){ return c.startDate && new Date(c.startDate+'T00:00:00')<=new Date(); }).length;
+  el.innerHTML =
+    '<h3 style="font-family:Syne,sans-serif;font-weight:700;font-size:18px;margin-bottom:20px">Platform Overview</h3>' +
+    '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px;margin-bottom:28px">' +
+      saStatCard('🏆','Total Competitions',totalComps,'across the platform')+saStatCard('▶️','Active',activeComps,'currently running')+saStatCard('👥','Total Members',totalMembers,'across all comps')+saStatCard('⚖️','Weigh-ins',totalWI,'logged platform-wide')+saStatCard('👤','Users',saAllUsers.length||'—','load Users tab') +
+    '</div>' +
+    '<h3 style="font-family:Syne,sans-serif;font-weight:700;font-size:16px;margin-bottom:14px">Recent Competitions</h3>' +
+    saAllComps.slice(0,5).map(function(c){ return saCompRow(c); }).join('') +
+    (saAllComps.length===0?'<div style="color:#888;font-size:13px">No competitions found. <button onclick="loadSAComps()" style="background:none;border:none;color:#7c6af7;cursor:pointer;font-size:13px">Refresh</button></div>':'');
+}
+
+function saStatCard(icon,label,val,sub) {
+  return '<div style="background:#1e1e24;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px 18px"><div style="font-size:22px;margin-bottom:8px">'+icon+'</div><div style="font-family:Syne,sans-serif;font-weight:700;font-size:24px;color:#f0f0f4">'+val+'</div><div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.6px;color:#9090a0;margin-top:4px">'+label+'</div><div style="font-size:11px;color:#666;margin-top:2px">'+sub+'</div></div>';
+}
+
+function saCompRow(c) {
+  var started = c.startDate ? new Date(c.startDate+'T00:00:00')<=new Date() : false;
+  var status = !c.startDate?'⏳ Not started':started?'▶️ Active':'📅 Scheduled';
+  var pool = (c.memberCount||0)*(c.buyin||0);
+  return '<div style="background:#1e1e24;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:14px 16px;margin-bottom:8px;display:flex;align-items:center;gap:12px">' +
+    '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:14px;color:#f0f0f4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(c.name||'Unnamed')+'</div><div style="font-size:12px;color:#9090a0;margin-top:2px">'+status+' · '+(c.memberCount||0)+' members · '+(c.weeks||8)+' weeks'+(pool>0?' · $'+pool+' pool':'')+'</div></div>' +
+    '<div style="display:flex;gap:6px;flex-shrink:0;flex-wrap:wrap">' +
+      '<button style="background:rgba(124,106,247,0.2);color:#a99af9;border:none;border-radius:7px;padding:6px 12px;font-size:12px;cursor:pointer" data-cid="'+c.id+'" data-mode="admin" onclick="saEnterComp(this.dataset.cid,this.dataset.mode)">👁 Admin</button>' +
+      '<button style="background:rgba(95,212,179,0.15);color:#5fd4b3;border:none;border-radius:7px;padding:6px 12px;font-size:12px;cursor:pointer" data-cid="'+c.id+'" data-mode="user" onclick="saEnterComp(this.dataset.cid,this.dataset.mode)">👤 User View</button>' +
+      '<button style="background:rgba(247,178,106,0.15);color:#f7b26a;border:none;border-radius:7px;padding:6px 12px;font-size:12px;cursor:pointer" data-cid="'+c.id+'" onclick="saPickUserView(this.dataset.cid)">🎭 View as...</button>' +
+      '<button style="background:rgba(95,212,179,0.15);color:#5fd4b3;border:none;border-radius:7px;padding:6px 12px;font-size:12px;cursor:pointer" data-cid="'+c.id+'" onclick="saRecalcComp(this.dataset.cid,this)">🔄 Recalc</button>' +
+      (c.suspended?'<button style="background:rgba(95,212,160,0.15);color:#5fd4a0;border:none;border-radius:7px;padding:6px 12px;font-size:12px;cursor:pointer" data-cid="'+c.id+'" onclick="saToggleSuspend(this.dataset.cid,false,this)">✅ Unsuspend</button>':'<button style="background:rgba(224,82,82,0.15);color:#e05252;border:none;border-radius:7px;padding:6px 12px;font-size:12px;cursor:pointer" data-cid="'+c.id+'" onclick="saToggleSuspend(this.dataset.cid,true,this)">🚫 Suspend</button>') +
+    '</div></div>';
+}
+
+function renderSAComps() {
+  var el = $('sa-content'); if(!el) return;
+  el.innerHTML =
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px"><h3 style="font-family:Syne,sans-serif;font-weight:700;font-size:18px">All Competitions ('+saAllComps.length+')</h3><button onclick="loadSAComps()" style="background:rgba(124,106,247,0.2);color:#a99af9;border:none;border-radius:8px;padding:7px 14px;font-size:13px;cursor:pointer">🔄 Refresh</button></div>' +
+    '<div style="display:flex;gap:8px;margin-bottom:16px"><input type="text" id="sa-comp-search" placeholder="Search by name or invite code..." oninput="filterSAComps()" style="flex:1;background:#1e1e24;border:1px solid rgba(255,255,255,0.1);border-radius:9px;color:#f0f0f4;padding:10px 14px;font-size:14px;outline:none"><button onclick="saSearchByCode()" style="background:rgba(95,212,179,0.15);color:#5fd4b3;border:none;border-radius:9px;padding:10px 16px;font-size:13px;cursor:pointer;white-space:nowrap">🔑 Find by Code</button></div>' +
+    '<div id="sa-comp-list">'+(saAllComps.length===0?'<div style="color:#888;font-size:13px">Loading...</div>':saAllComps.map(function(c){ return saCompRow(c); }).join(''))+'</div>';
+}
+window.filterSAComps = function() {
+  var q = ($('sa-comp-search')?.value||'').toLowerCase().trim();
+  var list = $('sa-comp-list'); if(!list) return;
+  var filtered = q ? saAllComps.filter(function(c){ return (c.name||'').toLowerCase().includes(q)||(c.inviteCode||'').toLowerCase().includes(q); }) : saAllComps;
+  list.innerHTML = filtered.length>0 ? filtered.map(function(c){ return saCompRow(c); }).join('') : '<div style="color:#888;font-size:13px;padding:20px 0">No competitions match "'+q+'"</div>';
+};
+window.saSearchByCode = async function() {
+  var input=$('sa-comp-search'), code=(input?.value||'').trim().toUpperCase();
+  if(!code){ input?.focus(); return; }
+  var list=$('sa-comp-list'); if(!list) return;
+  list.innerHTML='<div style="color:#9090a0;font-size:13px;padding:20px 0">⏳ Searching...</div>';
+  try {
+    var snap=await getDocs(query(collection(db,'competitions'),where('inviteCode','==',code)));
+    if(snap.empty){list.innerHTML='<div style="color:#e05252;font-size:13px;padding:20px 0">No competition found with code <strong>'+code+'</strong></div>';return;}
+    var results=await Promise.all(snap.docs.map(async function(d){
+      var data={id:d.id,...d.data()};
+      var ms=await getDocs(collection(db,'competitions',d.id,'members')); data.memberCount=ms.size; data.members=ms.docs.map(function(m){return{uid:m.id,...m.data()};});
+      var ws=await getDocs(collection(db,'competitions',d.id,'weighins')); data.weighInCount=ws.size;
+      return data;
+    }));
+    list.innerHTML=results.map(function(c){return saCompRow(c);}).join('');
+  } catch(e){list.innerHTML='<div style="color:#e05252;font-size:13px;padding:20px 0">Error: '+e.message+'</div>';}
+};
+
+function renderSAUsers() {
+  var el=$('sa-content'); if(!el) return;
+  el.innerHTML='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px"><h3 style="font-family:Syne,sans-serif;font-weight:700;font-size:18px">All Users ('+saAllUsers.length+')</h3><button onclick="loadSAUsers()" style="background:rgba(124,106,247,0.2);color:#a99af9;border:none;border-radius:8px;padding:7px 14px;font-size:13px;cursor:pointer">🔄 Refresh</button></div><div style="margin-bottom:14px"><input type="text" id="sa-user-search" placeholder="Search by name or email..." oninput="filterSAUsers()" style="width:100%;background:#1e1e24;border:1px solid rgba(255,255,255,0.1);border-radius:9px;color:#f0f0f4;padding:10px 14px;font-size:14px;outline:none"></div><div id="sa-user-list">'+saAllUsers.map(function(u){return saUserRow(u);}).join('')+(saAllUsers.length===0?'<div style="color:#888;font-size:13px">Loading users...</div>':'')+'</div>';
+}
+function saUserRow(u) {
+  return '<div style="background:#1e1e24;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 16px;margin-bottom:8px;display:flex;align-items:center;gap:12px"><div style="width:36px;height:36px;border-radius:50%;background:rgba(124,106,247,0.2);color:#a99af9;display:flex;align-items:center;justify-content:center;font-family:Syne,sans-serif;font-weight:700;font-size:14px;flex-shrink:0">'+(u.displayName||'?')[0].toUpperCase()+'</div><div style="flex:1;min-width:0"><div style="font-weight:500;font-size:14px;color:#f0f0f4">'+(u.displayName||'Unknown')+'</div><div style="font-size:12px;color:#9090a0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(u.email||u.uid)+'</div></div><span style="font-size:11px;padding:3px 9px;border-radius:99px;background:'+(u.role==='superAdmin'?'rgba(247,178,106,0.2)':u.role==='admin'?'rgba(124,106,247,0.2)':'rgba(95,212,179,0.15)')+';color:'+(u.role==='superAdmin'?'#f7b26a':u.role==='admin'?'#a99af9':'#5fd4b3')+'">'+(u.role||'user')+'</span></div>';
+}
+window.filterSAUsers = function() {
+  var q=($('sa-user-search')?.value||'').toLowerCase();
+  var filtered=q?saAllUsers.filter(function(u){return(u.displayName||'').toLowerCase().includes(q)||(u.email||'').toLowerCase().includes(q);}):saAllUsers;
+  var el=$('sa-user-list'); if(el) el.innerHTML=filtered.map(function(u){return saUserRow(u);}).join('')||'<div style="color:#888;font-size:13px">No users found</div>';
+};
+
+window.saEnterComp = async function(compId, viewMode, ghostAsUid) {
+  saViewingComp=compId; saGhostUid=ghostAsUid||null; currentCompId=compId;
+  var snap=await getDoc(doc(db,'competitions',compId));
+  currentComp=snap.exists()?snap.data():null;
+  compMembership=viewMode==='user'?{role:'competitor',uid:ghostAsUid||currentUser.uid,ghost:true,userView:true}:{role:'admin',uid:currentUser.uid,ghost:true};
+  startListeners(); showScreen('app-shell'); updateNavForRole();
+  if(typeof window.applyTheme==='function') window.applyTheme(document.documentElement.classList.contains('dark-mode'));
+  showTab('compete');
+  var ghostBar=$('sa-ghost-bar');
+  if(ghostBar){
+    ghostBar.style.display='flex';
+    ghostBar.querySelector('#ghost-comp-name').textContent=currentComp?.name||compId;
+    var ml=ghostBar.querySelector('#ghost-mode-label');
+    if(ml){
+      if(ghostAsUid){var us=await getDoc(doc(db,'users',ghostAsUid));ml.textContent='(Viewing as '+(us.exists()?(us.data().displayName||ghostAsUid):ghostAsUid)+')';}
+      else{ml.textContent=viewMode==='user'?'(User View)':'(Admin View)';}
+    }
+  }
+  var rb=$('sa-return-btn'); if(rb) rb.style.display='';
+};
+
+window.saPickUserView = async function(compId) {
+  var ms=await getDocs(collection(db,'competitions',compId,'members'));
+  var members=ms.docs.map(function(d){return{uid:d.id,...d.data()};}).sort(function(a,b){return(a.displayName||'').localeCompare(b.displayName||'');});
+  var ov=document.createElement('div'); ov.id='sa-ghost-modal';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+  ov.innerHTML='<div style="background:#1e1e24;border:1px solid rgba(255,255,255,0.12);border-radius:16px;padding:24px;width:100%;max-width:360px;max-height:80vh;overflow-y:auto"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px"><div style="font-family:Syne,sans-serif;font-weight:700;font-size:16px;color:#f0f0f4">🎭 View as a user</div><button onclick="document.getElementById(&quot;sa-ghost-modal&quot;).remove()" style="background:none;border:none;color:#666;font-size:20px;cursor:pointer">×</button></div><p style="font-size:13px;color:#9090a0;margin-bottom:16px">See the app exactly as they see it.</p>'+members.map(function(m){return'<button data-uid="'+m.uid+'" data-cid="'+compId+'" onclick="saEnterComp(this.dataset.cid,&quot;user&quot;,this.dataset.uid);document.getElementById(&quot;sa-ghost-modal&quot;).remove()" style="width:100%;display:flex;align-items:center;gap:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:9px;padding:10px 12px;margin-bottom:6px;cursor:pointer;text-align:left"><div style="width:32px;height:32px;border-radius:50%;background:rgba(124,106,247,0.2);color:#a99af9;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0">'+(m.displayName||'?')[0].toUpperCase()+'</div><div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:500;color:#f0f0f4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(m.displayName||'Unknown')+'</div><div style="font-size:11px;color:#9090a0">'+(m.playerType==='free'?'Free':'Paying')+' · '+m.role+'</div></div><span style="font-size:11px;color:#666">→</span></button>';}).join('')+'</div>';
+  document.body.appendChild(ov);
+  ov.addEventListener('click',function(e){if(e.target===ov)ov.remove();});
+};
+
+window.showSAPanel = function() { showScreen('super-admin-panel'); renderSAPanel(); };
+
+window.goToSAPanel = async function() {
+  stopListeners();
+  currentCompId=null; currentComp=null; compMembership=null;
+  competitors=[]; allWeighIns=[]; matchups=[]; saViewingComp=null; saGhostUid=null;
+  showScreen('super-admin-panel');
+  await loadSuperAdminData();
+};
+
+window.saReturnToPanel = function() {
+  var gb=$('sa-ghost-bar'); if(gb) gb.style.display='none';
+  var rb=$('sa-return-btn'); if(rb) rb.style.display='none';
+  stopListeners();
+  currentCompId=null; currentComp=null; compMembership=null;
+  competitors=[]; allWeighIns=[]; matchups=[]; saViewingComp=null; saGhostUid=null;
+  showScreen('super-admin-panel'); renderSAPanel();
+};
+
+window.saExitComp = function() {
+  var gb=$('sa-ghost-bar'); if(gb) gb.style.display='none';
+  stopListeners();
+  currentCompId=null; currentComp=null; compMembership=null;
+  competitors=[]; allWeighIns=[]; matchups=[]; saViewingComp=null; saGhostUid=null;
+  showScreen('super-admin-panel'); renderSAPanel();
+};
+
+window.saRecalcComp = async function(compId, btn) {
+  if(btn){btn.textContent='⏳';btn.disabled=true;}
+  try {
+    var ms=await getDocs(collection(db,'competitions',compId,'members'));
+    var members=ms.docs.map(function(d){return{uid:d.id,...d.data()};});
+    var count=0;
+    for(var i=0;i<members.length;i++){
+      var uid=members[i].uid;
+      var ws=await getDocs(query(collection(db,'competitions',compId,'weighins'),where('userId','==',uid)));
+      var wd=ws.docs.map(function(d){return d.data();}).sort(function(a,b){return a.date.localeCompare(b.date);});
+      if(wd.length>=2){var sw=wd[0],lt=wd[wd.length-1];await updateDoc(doc(db,'competitions',compId,'members',uid),{totalPct:+((sw.weight-lt.weight)/sw.weight*100).toFixed(4),weighInCount:wd.length,lastWeighIn:lt.date,unit:sw.unit||'kg'});count++;}
+      else if(wd.length===1){await updateDoc(doc(db,'competitions',compId,'members',uid),{totalPct:0,weighInCount:1,lastWeighIn:wd[0].date,unit:wd[0].unit||'kg'});count++;}
+    }
+    if(btn){btn.textContent='✅ Done ('+count+')';setTimeout(function(){btn.textContent='🔄 Recalc';btn.disabled=false;},3000);}
+  } catch(e){if(btn){btn.textContent='❌ Error';btn.disabled=false;}console.error('Recalc:',e);}
+};
+
+window.saToggleSuspend = async function(compId, suspend, btn) {
+  if(!confirm(suspend?'Suspend this competition? Members will see a notice.':'Unsuspend?')) return;
+  if(btn){btn.disabled=true;btn.textContent='⏳';}
+  await updateDoc(doc(db,'competitions',compId),{suspended:suspend});
+  await loadSAComps();
+};
+
+
 window.submitBugReport = async function() {
   var title = $('bug-title')?.value.trim();
   var description = $('bug-description')?.value.trim();
@@ -2802,10 +3126,8 @@ window.submitBugReport = async function() {
 };
 
 window.recalcCurrentComp = async function() {
-  if(!currentCompId || !isCompAdmin()) return;
-  var memSnap = await getDocs(collection(db,'competitions',currentCompId,'members'));
-  var members = memSnap.docs.map(function(d){ return {uid:d.id,...d.data()}; });
-  for(var i=0; i<members.length; i++) { await updatePublicStats(members[i].uid); }
+  if(!currentCompId) return;
+  await saRecalcComp(currentCompId, null);
   showAlert('admin-alert','Stats recalculated for all competitors!','success');
 };
 
@@ -3251,12 +3573,12 @@ function renderSubmitPageC() {
   curWeekEl.textContent = getCurrentWeek();
   var selWrap = $('submit-comp-select-wrap-c');
   if(!selWrap) return;
-  selWrap.style.display = isCompAdmin() ? '' : 'none';
-  if(isCompAdmin()) {
+  if(isSuperAdmin()) {
+    selWrap.style.display = '';
     var prevSel = $('submit-comp-sel-c').value;
     $('submit-comp-sel-c').innerHTML = '<option value="">Select competitor...</option>' +
       competitors.map(function(c){ return '<option value="'+c.uid+'"'+(c.uid===prevSel?' selected':'')+'>'+c.displayName+'</option>'; }).join('');
-  }
+  } else { selWrap.style.display = 'none'; }
   var targetUid = (isCompAdmin() && ($('submit-comp-sel-c')?.value || window._selectedCompUidC))
     ? ($('submit-comp-sel-c')?.value || window._selectedCompUidC) : currentUser?.uid;
   var wi = userWeighIns(targetUid), sw = wi.length ? wi[0] : null, unit = sw?.unit || 'kg', isFirst = wi.length === 0;
@@ -3282,7 +3604,7 @@ function renderSubmitPageC() {
       '<td style="font-weight:500">'+e.weight.toFixed(1)+' '+(e.unit||'kg')+'</td>' +
       '<td style="color:'+(wpct!=null&&wpct>=0?'var(--success)':'var(--danger)')+';font-weight:700">'+(wpct!=null?fmtPct(wpct):'-')+'</td>' +
       '<td style="color:var(--accent2);font-weight:700">'+(e===sw?'Starting':(tpct>=0?fmtPct(tpct):'+'+Math.abs(tpct).toFixed(2)+'%'))+'</td>' +
-      '<td>'+(isCompAdmin()?'<button class="btn btn-danger btn-sm" data-eid="'+e.id+'" onclick="adminDeleteWeighIn(this.dataset.eid)">🗑️</button>':'')+'</td></tr>';
+      '<td>'+(isSuperAdmin()?'<button class="btn btn-danger btn-sm" data-eid="'+e.id+'" onclick="adminDeleteWeighIn(this.dataset.eid)">🗑️</button>':'')+'</td></tr>';
   }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:32px">No weigh-ins yet!</td></tr>';
   var pgEl=$('history-pagination-c');
   if(pgEl){
@@ -3368,7 +3690,7 @@ function renderAdminPage(){
     el.style.display = isCompAdmin() ? '' : 'none';
   });
   document.querySelectorAll('.super-admin-only').forEach(function(el){
-    el.style.display = 'none';
+    el.style.display = isSuperAdmin() ? '' : 'none';
   });
 
   if(!isCompAdmin()) return; // rest is admin only
@@ -3456,7 +3778,7 @@ window.exportData=async function(){
 
 // ── TEST DATA (super-admin only) ─────────────────────────────
 window.generateTestData=async function(){
-  if(!isCompAdmin()){showAlert('admin-alert','Admin only','danger');return;}
+  if(!isSuperAdmin()){showAlert('admin-alert','Super admin only','danger');return;}
   if(!currentComp?.startDate){showAlert('admin-alert','Set a competition start date first','danger');return;}
   if(competitors.length===0){showAlert('admin-alert','Add competitors first','danger');return;}
 
@@ -3527,7 +3849,7 @@ window.generateTestData=async function(){
 };
 
 window.clearTestData=async function(){
-  if(!isCompAdmin())return;
+  if(!isSuperAdmin())return;
   if(!confirm('Delete all TEST weigh-in data for this competition?'))return;
   var snap=await getDocs(query(collection(db,'competitions',currentCompId,'weighins'),where('isTest','==',true)));
   var batches=[],current=writeBatch(db),cnt=0;
@@ -3538,7 +3860,7 @@ window.clearTestData=async function(){
 };
 
 window.clearAllWeighIns=async function(){
-  if(!isCompAdmin())return;
+  if(!isSuperAdmin())return;
   if(!confirm('Delete ALL weigh-in data for this competition?'))return;
   var snap=await getDocs(collection(db,'competitions',currentCompId,'weighins'));
   var batches=[],current=writeBatch(db),cnt=0;
@@ -3598,6 +3920,7 @@ window.clearAllWeighIns=async function(){
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;transition:background .2s,color .2s}
+#sa-ghost-bar~#app-shell .main{padding-top:64px}
 /* Offline banner */
 #offline-banner{display:none;position:fixed;top:0;left:0;right:0;z-index:9998;background:#e05252;color:#fff;text-align:center;padding:8px 16px;font-size:13px;font-weight:600}
 h1,h2,h3,h4{font-family:'Syne',sans-serif}
@@ -3818,6 +4141,8 @@ tr:hover td{background:var(--bg3)}
 .flex-between{display:flex;align-items:center;justify-content:space-between}
 .wbadge{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:6px;font-size:12px;font-weight:700;font-family:'Syne';background:rgba(124,106,247,0.2);color:var(--accent)}
 .hidden{display:none!important}
+.sa-tab.active{color:#f0f0f4!important;border-bottom-color:#7c6af7!important}
+.sa-tab:hover{color:#f0f0f4!important}
 
 /* ── 4-TAB LAYOUT ──────────────────────────────────────────── */
 .tab-panel{display:block;padding:24px 0 0}
@@ -3905,6 +4230,36 @@ tr:hover td{background:var(--bg3)}
 <!-- OFFLINE BANNER -->
 <div id="offline-banner">⚠️ No internet connection — changes will not be saved until you reconnect</div>
 
+
+<!-- SUPER ADMIN GHOST BAR -->
+<div id="sa-ghost-bar" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;background:rgba(247,178,106,0.95);color:#1a1a1a;padding:8px 16px;align-items:center;gap:12px;font-size:13px;font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,0.3)">
+  <span>👻 Ghost Mode</span>
+  <span style="flex:1">Viewing: <strong id="ghost-comp-name"></strong> <span id="ghost-mode-label" style="opacity:0.7;font-size:11px"></span></span>
+  <button onclick="saExitComp()" style="background:rgba(0,0,0,0.2);border:none;border-radius:7px;padding:5px 14px;font-size:12px;font-weight:600;cursor:pointer;color:#1a1a1a">✕ Exit to SA Panel</button>
+</div>
+
+<!-- SUPER ADMIN PANEL -->
+<div id="super-admin-panel" style="display:none;min-height:100vh;background:#0a0a0c;color:#f0f0f4;font-family:'DM Sans',sans-serif;overflow-x:hidden;max-width:100vw">
+  <div style="background:#111116;border-bottom:1px solid rgba(255,255,255,0.08);padding:0 16px;display:flex;align-items:center;gap:0;position:sticky;top:0;z-index:50;flex-wrap:wrap">
+    <div style="padding:16px 0;margin-right:24px">
+      <div style="font-family:Syne,sans-serif;font-weight:800;font-size:18px">Weigh<span style="color:#7c6af7">Bet</span></div>
+      <div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#f7b26a;margin-top:1px">Super Admin</div>
+    </div>
+    <div style="display:flex;gap:2px;flex:1">
+      <button class="sa-tab active" data-satab="overview"     onclick="switchSATab('overview')"     style="padding:16px 18px;background:none;border:none;color:#9090a0;font-size:13px;font-weight:500;cursor:pointer;border-bottom:2px solid transparent;font-family:'DM Sans',sans-serif">📊 Overview</button>
+      <button class="sa-tab"        data-satab="competitions" onclick="switchSATab('competitions')" style="padding:16px 18px;background:none;border:none;color:#9090a0;font-size:13px;font-weight:500;cursor:pointer;border-bottom:2px solid transparent;font-family:'DM Sans',sans-serif">🏆 Competitions</button>
+      <button class="sa-tab"        data-satab="users"        onclick="switchSATab('users')"        style="padding:16px 18px;background:none;border:none;color:#9090a0;font-size:13px;font-weight:500;cursor:pointer;border-bottom:2px solid transparent;font-family:'DM Sans',sans-serif">👥 Users</button>
+      <button class="sa-tab"        data-satab="bugs"         onclick="switchSATab('bugs')"         style="padding:16px 18px;background:none;border:none;color:#9090a0;font-size:13px;font-weight:500;cursor:pointer;border-bottom:2px solid transparent;font-family:'DM Sans',sans-serif">🐛 Bug Reports <span id="sa-bug-badge" style="display:none;background:#e05252;color:#fff;border-radius:99px;font-size:10px;padding:1px 6px;margin-left:4px"></span></button>
+    </div>
+    <div style="display:flex;gap:8px;flex-shrink:0">
+      <button onclick="saGoToMyComps()" style="background:rgba(95,212,179,0.15);color:#5fd4b3;border:none;border-radius:8px;padding:7px 14px;font-size:13px;cursor:pointer;font-family:'DM Sans',sans-serif">🏠 My Competition</button>
+      <button onclick="doSignOut()" style="background:rgba(224,82,82,0.15);color:#e05252;border:none;border-radius:8px;padding:7px 14px;font-size:13px;cursor:pointer;font-family:'DM Sans',sans-serif">⏻ Sign Out</button>
+    </div>
+  </div>
+  <div style="max-width:1100px;margin:0 auto;padding:20px 16px;overflow-x:hidden" id="sa-content">
+    <div style="color:#9090a0;font-size:13px">Loading platform data...</div>
+  </div>
+</div>
 
 <!-- PASSWORD RESET SCREEN -->
 <div id="reset-password-screen" class="flex-center" style="display:none">
@@ -4006,6 +4361,8 @@ tr:hover td{background:var(--bg3)}
       <div class="nav-item"        data-tab="settings" onclick="showTab('settings')"><span class="nav-icon">⚙️</span>Preferences</div>
     </div>
     <div class="nav-bottom">
+      <div id="sa-return-btn" class="switch-btn super-admin-only" style="display:none;color:var(--accent3);margin-bottom:6px" onclick="saReturnToPanel()">← SA Panel</div>
+      <button id="sa-panel-btn" class="super-admin-only" onclick="goToSAPanel()" style="display:none;width:100%;background:rgba(247,178,106,0.1);border:1px solid rgba(247,178,106,0.25);border-radius:9px;color:var(--accent3);padding:8px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;margin-bottom:8px;text-align:left">⚙️ Super Admin Panel</button>
       <div class="nav-user">
         <div class="nav-user-init" id="nav-user-init"></div>
         <div style="flex:1;min-width:0">
@@ -4263,8 +4620,8 @@ tr:hover td{background:var(--bg3)}
             <div class="section-title">Account <span class="line"></span></div>
             <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px">
               <div style="width:64px;height:64px;flex-shrink:0;position:relative">
-                <img id="profile-avatar-img" src="" style="display:none;position:absolute;inset:0;width:64px;height:64px;border-radius:50%;object-fit:cover;border:2px solid rgba(255,255,255,0.1)">
-                <div id="profile-avatar-init" style="position:absolute;inset:0;width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:'Syne';font-weight:800;font-size:22px;background:rgba(124,106,247,0.2);color:var(--accent);overflow:hidden"></div>
+                <img id="profile-avatar-img" src="" style="display:none;width:64px;height:64px;border-radius:50%;object-fit:cover;border:2px solid rgba(255,255,255,0.1)">
+                <div id="profile-avatar-init" style="width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:'Syne',sans-serif;font-weight:800;font-size:22px;line-height:1;background:rgba(124,106,247,0.2);color:var(--accent)"></div>
               </div>
               <div>
                 <div style="font-family:'Syne';font-size:20px;font-weight:700" id="profile-name-display"></div>
@@ -4393,6 +4750,10 @@ tr:hover td{background:var(--bg3)}
       <div id="admin-alert"></div>
       <!-- Admin note notification banner — shown when SA has replied to a bug report -->
       <div id="admin-note-banner" style="display:none;background:rgba(124,106,247,0.08);border:1px solid rgba(124,106,247,0.25);border-radius:12px;padding:16px;margin-bottom:16px"></div>
+
+      <div id="sa-prefs-btn-wrap" class="super-admin-only" style="display:none;margin-bottom:16px">
+        <button onclick="goToSAPanel()" style="width:100%;background:rgba(247,178,106,0.1);border:1px solid rgba(247,178,106,0.25);border-radius:10px;color:var(--accent3);padding:12px 16px;font-size:14px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;text-align:left">⚙️ Open Super Admin Panel <span style="float:right;opacity:0.6">→</span></button>
+      </div>
 
       <!-- App Preferences - always visible to everyone -->
       <div class="card mb-16">
