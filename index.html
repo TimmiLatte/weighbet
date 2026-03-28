@@ -624,11 +624,10 @@ function startListeners() {
     refreshCurrentPage();
   }));
 
-  // Always start with own weighins; admin listener restarts after membership confirms
-  var wiQ=query(collection(db,'competitions',currentCompId,'weighins'),where('userId','==',currentUser.uid));
-  var wiUnsub=onSnapshot(wiQ, snap=>{
+  // Load ALL competition weighins so charts, earnings, and H2H results work for everyone.
+  // Individual weights are never displayed to other users — only % calculations use this data.
+  var wiUnsub=onSnapshot(collection(db,'competitions',currentCompId,'weighins'), snap=>{
     allWeighIns=snap.docs.map(d=>({id:d.id,...d.data()}));
-    // Destroy cached chart so it rebuilds with fresh data on next render
     if(dashChart) { dashChart.destroy(); dashChart = null; }
     refreshCurrentPage();
   });
@@ -1747,21 +1746,39 @@ function renderDashboardChart() {
     var color=getAvatarColor(c.displayName), isMe=c.uid===viewingUid();
     var data=[];
     var sw2=startingWeight(c.uid);
-    var lastVal = 0; // carry forward last known value for weeks with no weigh-in
+    var hasLiveData = sw2 && userWeighIns(c.uid).length >= 2;
+    var lastVal = 0;
     for(var w=1;w<=totalWeeks;w++){
       if(w>curWkNum){data.push(null);continue;}
       if(w===1){data.push(0);lastVal=0;continue;}
-      // Always use direct cumulative calculation from starting weight.
-      // Formula: (startWeight - weekWeight) / startWeight * 100
-      // Positive = weight lost (line goes UP = good). Matches leaderboard exactly.
-      if(sw2){
+      if(hasLiveData){
+        // Own weigh-ins available — use direct calculation.
+        // Formula: (weekWeight - startWeight) / startWeight * 100
+        // Negative = weight lost (line goes DOWN). More intuitive.
         var entry=lastWeighInForWeek(c.uid,w);
         if(entry){
-          lastVal = +((sw2.weight - entry.weight) / sw2.weight * 100).toFixed(2);
+          lastVal = +((entry.weight - sw2.weight) / sw2.weight * 100).toFixed(2);
         }
-        data.push(lastVal); // carry forward if no weigh-in this week
+        data.push(lastVal);
       } else {
-        data.push(null);
+        // No live weigh-in data for this competitor — use stored member doc values.
+        // weeklyPcts stores week-over-week % lost (positive = lost weight).
+        // We accumulate and negate so the chart goes down for weight loss.
+        var weeklyPcts = c.weeklyPcts || {};
+        if(Object.keys(weeklyPcts).length > 0){
+          var cumulative = 0;
+          for(var pw=1; pw<=w; pw++){
+            if(weeklyPcts[pw] !== undefined) cumulative += weeklyPcts[pw];
+          }
+          lastVal = +(-cumulative).toFixed(2); // negate: lost weight = line goes down
+          data.push(lastVal);
+        } else if(c.totalPct != null){
+          // Fallback: linear interpolation from stored total
+          lastVal = +(-(c.totalPct * (w-1) / Math.max(curWkNum-1, 1))).toFixed(2);
+          data.push(lastVal);
+        } else {
+          data.push(null);
+        }
       }
     }
     return{label:c.displayName+(isMe?' (you)':''),data,borderColor:color,backgroundColor:color+'22',tension:0.3,pointRadius:isMe?5:3,borderWidth:isMe?2:1,fill:false,spanGaps:false};
