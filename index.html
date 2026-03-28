@@ -1728,10 +1728,21 @@ function renderDashboardChart() {
   var uid = viewingUid();
 
   var chartStats;
-  if(compChartMode === 'compare' && compCompareUid) {
-    // Compare mode: just own line + selected person
+  if(compChartMode === 'compare') {
+    if(!compCompareUid) {
+      // No competitor chosen yet — destroy any existing chart and show prompt
+      if(dashChart){ dashChart.destroy(); dashChart=null; }
+      var ctx0=$('dashChart');
+      if(ctx0){ ctx0.style.display='none'; }
+      var wrap=$('comp-chart-compare-wrap');
+      if(wrap) wrap.style.display='';
+      return;
+    }
+    // Compare mode: own line + selected person
+    var ctx0=$('dashChart'); if(ctx0) ctx0.style.display='';
     chartStats = stats.filter(function(c){ return c.uid === uid || c.uid === compCompareUid; });
   } else {
+    var ctx0=$('dashChart'); if(ctx0) ctx0.style.display='';
     // Top5 mode: top 5 by totalPct + own line if not already in top 5
     var top5 = stats.filter(function(c){ return c.weighIns>0; }).slice(0,5);
     var inTop5 = top5.some(function(c){ return c.uid === uid; });
@@ -1857,14 +1868,14 @@ function renderPrizes(){
     freeNote + finalNote;
 
   var earnMap={};
-  var _vUid = viewingUid();
   var _wpp = Math.max(1, Math.floor(paying.length/2));
   var _basePrizePerWin = _wpp > 0 ? (pool*0.35/weeks)/_wpp : 0;
   for(var w=1;w<=curWk;w++){
     getAllH2HResults(w).forEach(r=>{
+      // Use base prize per win only — never the redistributed amount.
+      // r.prize may include redistribution from unclaimed weeks which inflates earnings.
       if(r.winner && r.prize > 0) {
-        var actualPrize = Math.min(r.prize, _basePrizePerWin);
-        earnMap[r.winner]=(earnMap[r.winner]||0)+actualPrize;
+        earnMap[r.winner]=(earnMap[r.winner]||0)+_basePrizePerWin;
       }
     });
     var wkBests=payingCompetitors().map(c=>({uid:c.uid,pct:weeklyPctLost(c.uid,w)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct);
@@ -2366,8 +2377,7 @@ function renderProgressPage(){
   for(var ew=1;ew<=curWeek;ew++){
     getAllH2HResults(ew).forEach(function(r){
       if(r.winner && r.prize > 0){
-        var actualPrize = Math.min(r.prize, _basePrizePerWin2);
-        allEarnMap[r.winner]=(allEarnMap[r.winner]||0)+actualPrize;
+        allEarnMap[r.winner]=(allEarnMap[r.winner]||0)+_basePrizePerWin2;
       }
     });
     var wkBests=payingCompetitors().map(function(c){return{uid:c.uid,pct:weeklyPctLost(c.uid,ew)};}).filter(function(x){return x.pct!=null;}).sort(function(a,b){return b.pct-a.pct;});
@@ -4136,9 +4146,9 @@ tr:hover td{background:var(--bg3)}
           <div class="card">
             <div class="section-title">Account <span class="line"></span></div>
             <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px">
-              <div style="position:relative;width:64px;height:64px;flex-shrink:0">
-                <img id="profile-avatar-img" src="" style="display:none;width:64px;height:64px;border-radius:50%;object-fit:cover;border:2px solid rgba(255,255,255,0.1)">
-                <div id="profile-avatar-init" style="width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:'Syne';font-weight:800;font-size:22px;background:rgba(124,106,247,0.2);color:var(--accent);flex-shrink:0;overflow:hidden"></div>
+              <div style="width:64px;height:64px;flex-shrink:0;position:relative">
+                <img id="profile-avatar-img" src="" style="display:none;position:absolute;inset:0;width:64px;height:64px;border-radius:50%;object-fit:cover;border:2px solid rgba(255,255,255,0.1)">
+                <div id="profile-avatar-init" style="position:absolute;inset:0;width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:'Syne';font-weight:800;font-size:22px;background:rgba(124,106,247,0.2);color:var(--accent);overflow:hidden"></div>
               </div>
               <div>
                 <div style="font-family:'Syne';font-size:20px;font-weight:700" id="profile-name-display"></div>
