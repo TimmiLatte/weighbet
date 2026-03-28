@@ -85,7 +85,12 @@ window.showAuthTab = function(tab) {
 // ── SCREENS ──────────────────────────────────────────────────
 function showScreen(id) {
   ['auth','pending','rejected','not-admin','app'].forEach(s => {
-    const el = $(s+'-screen'); if(el) el.style.display = s===id ? '' : 'none';
+    const el = $(s+'-screen'); if(!el) return;
+    if(s === id) {
+      el.style.display = s === 'app' ? 'flex' : '';
+    } else {
+      el.style.display = 'none';
+    }
   });
 }
 
@@ -101,7 +106,7 @@ function renderHeader() {
 window.switchTab = async function(tab) {
   activeTab = tab;
   document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.tab===tab));
-  document.querySelectorAll('.tab-panel').forEach(el => el.style.display = el.dataset.tab===tab ? '' : 'none');
+  document.querySelectorAll('.tab-panel').forEach(el => el.style.display = el.dataset.tab===tab ? 'block' : 'none');
   if(tab==='dashboard')    await renderDashboard();
   else if(tab==='competitions') await loadComps();
   else if(tab==='users')   await loadUsers();
