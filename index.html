@@ -131,10 +131,11 @@ let socialTab      = null;   // deprecated — use currentSubTab.social instead
 // ROLE HELPERS
 // ════════════════════════════════════════════════════════════
 
-const isSuperAdmin = () => false; // SA panel removed
+const isSuperAdmin = () => false;
 const viewingUid = () => currentUser?.uid;
 const isCompAdmin  = () => compMembership?.role === 'admin';
 const $ = id => document.getElementById(id);
+window.$ = $; // expose to non-module scripts
 window.$ = $; // expose to non-module scripts and inline onclick handlers
 
 // ════════════════════════════════════════════════════════════
@@ -1746,55 +1747,19 @@ function renderDashboardChart() {
     var color=getAvatarColor(c.displayName), isMe=c.uid===viewingUid();
     var data=[];
     var sw2=startingWeight(c.uid);
-    var ownWI=userWeighIns(c.uid);
-    var hasRealData = sw2 && ownWI.length >= 2;
-    var totalP = c.totalPct != null ? c.totalPct : null;
-    // For own user: if allWeighIns hasn't loaded yet, totalP from member doc is the fallback
-    // This prevents the line from disappearing on first render
-    if(isMe && !hasRealData && c.totalPct != null) {
-      totalP = c.totalPct;
-    }
-    var lastVal = 0; // track last known value to carry forward for missing weeks
+    var lastVal = 0; // carry forward last known value for weeks with no weigh-in
     for(var w=1;w<=totalWeeks;w++){
       if(w>curWkNum){data.push(null);continue;}
       if(w===1){data.push(0);lastVal=0;continue;}
-      if(hasRealData){
+      // Always use direct cumulative calculation from starting weight.
+      // Formula: (startWeight - weekWeight) / startWeight * 100
+      // Positive = weight lost (line goes UP = good). Matches leaderboard exactly.
+      if(sw2){
         var entry=lastWeighInForWeek(c.uid,w);
-        var val = entry&&sw2 ? +((entry.weight-sw2.weight)/sw2.weight*100).toFixed(2) : null;
-        // For missing weeks carry forward last known value so line doesn't jump
-        if(val===null) val=lastVal;
-        else lastVal=val;
-        data.push(val);
-      } else if(totalP!=null) {
-        // Use stored weeklyPcts map if available — gives accurate per-week curve
-        // weeklyPcts is populated by updatePublicStats on every weigh-in save
-        // Format: {1: weeklyPct, 2: weeklyPct, ...} where each value is % lost that week
-        var weeklyPcts = c.weeklyPcts || {};
-        var hasWeeklyData = Object.keys(weeklyPcts).length > 0;
-        if(hasWeeklyData) {
-          // Build cumulative % from weekly deltas
-          // Each weeklyPct is the % lost in that specific week vs previous week
-          // We accumulate to get total % from starting weight
-          var cumulative = 0;
-          var weeksPcts = [];
-          for(var pw2=1; pw2<=curWkNum; pw2++) {
-            if(weeklyPcts[pw2] !== undefined) {
-              cumulative += weeklyPcts[pw2];
-            }
-            weeksPcts[pw2] = +cumulative.toFixed(2);
-          }
-          var val2 = weeksPcts[w] !== undefined ? -weeksPcts[w] : null;
-          // Use null for weeks with no data (shows gap), carry forward for continuity
-          if(val2 === null) val2 = lastVal;
-          else lastVal = val2;
-          data.push(val2);
-        } else {
-          // No weekly data — linear interpolation as fallback
-          // This produces straight lines but is better than nothing
-          var interp = +(totalP * (w-1) / Math.max(curWkNum-1,1)).toFixed(2);
-          data.push(interp);
-          lastVal=interp;
+        if(entry){
+          lastVal = +((sw2.weight - entry.weight) / sw2.weight * 100).toFixed(2);
         }
+        data.push(lastVal); // carry forward if no weigh-in this week
       } else {
         data.push(null);
       }
@@ -1876,8 +1841,15 @@ function renderPrizes(){
 
   var earnMap={};
   var _vUid = viewingUid();
+  var _wpp = Math.max(1, Math.floor(paying.length/2));
+  var _basePrizePerWin = _wpp > 0 ? (pool*0.35/weeks)/_wpp : 0;
   for(var w=1;w<=curWk;w++){
-    getAllH2HResults(w).forEach(r=>{ if(r.winner)earnMap[r.winner]=(earnMap[r.winner]||0)+r.prize; });
+    getAllH2HResults(w).forEach(r=>{
+      if(r.winner && r.prize > 0) {
+        var actualPrize = Math.min(r.prize, _basePrizePerWin);
+        earnMap[r.winner]=(earnMap[r.winner]||0)+actualPrize;
+      }
+    });
     var wkBests=payingCompetitors().map(c=>({uid:c.uid,pct:weeklyPctLost(c.uid,w)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct);
     if(wkBests.length>0)earnMap[wkBests[0].uid]=(earnMap[wkBests[0].uid]||0)+wBL;
   }
@@ -2253,6 +2225,7 @@ function renderProgressPage(){
   var sw    = allWI.length ? allWI[0] : null;
   var unit  = sw?.unit || (trackerGoal?.unit) || 'kg';
 
+  // Competition weigh-ins for competition-specific stats
   var compWI = userWeighIns(uid);
   var compSw = compWI.length ? compWI[0] : null;
 
@@ -2262,6 +2235,8 @@ function renderProgressPage(){
   renderProgressChart();
 
   // ── TRACKER GOAL SECTION ─────────────────────────────────
+  // When ghosting as another user, don't show their personal tracker/goal data
+  // (we don't have access to it — only their competition data is visible to SA)
   var goal = trackerGoal;
   var goalEl = $('tracker-goal-section');
   if (goalEl) {
@@ -2364,18 +2339,33 @@ function renderProgressPage(){
   ].map(function(s){return'<div class="card card-sm" style="text-align:center;padding:18px 12px"><div style="font-size:26px;margin-bottom:6px">'+s.icon+'</div><div style="font-family:Syne,sans-serif;font-weight:700;font-size:20px;color:var(--text)">'+s.val+'</div><div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);margin-top:4px">'+s.label+'</div><div style="font-size:11px;color:var(--muted);margin-top:2px">'+s.sub+'</div></div>';}).join('');
 
   // ── EARNINGS ─────────────────────────────────────────────
+  // Show confirmed earnings for ALL competitors, current user highlighted.
   var pool=getPrizePool(), wksT=currentComp?.weeks||8, wBL2=pool*0.05/wksT;
-  var myEarnH2H=0, myEarnBL=0;
   var _earnUid = viewingUid();
+  var _payingCount = payingCompetitors().length;
+  var _wpp2 = Math.max(1, Math.floor(_payingCount/2));
+  var _basePrizePerWin2 = _wpp2 > 0 ? (pool*0.35/wksT)/_wpp2 : 0;
+  var allEarnMap = {};
   for(var ew=1;ew<=curWeek;ew++){
-    getAllH2HResults(ew).forEach(function(r){if(r.winner===_earnUid)myEarnH2H+=r.prize;});
+    getAllH2HResults(ew).forEach(function(r){
+      if(r.winner && r.prize > 0){
+        var actualPrize = Math.min(r.prize, _basePrizePerWin2);
+        allEarnMap[r.winner]=(allEarnMap[r.winner]||0)+actualPrize;
+      }
+    });
     var wkBests=payingCompetitors().map(function(c){return{uid:c.uid,pct:weeklyPctLost(c.uid,ew)};}).filter(function(x){return x.pct!=null;}).sort(function(a,b){return b.pct-a.pct;});
-    if(wkBests.length>0&&wkBests[0].uid===_earnUid)myEarnBL+=wBL2;
+    if(wkBests.length>0) allEarnMap[wkBests[0].uid]=(allEarnMap[wkBests[0].uid]||0)+wBL2;
   }
-  var myTotal=myEarnH2H+myEarnBL;
-  $('progress-earnings').innerHTML=myTotal===0
+  var allEarnList=Object.entries(allEarnMap).map(function(e){return{uid:e[0],total:e[1]};}).sort(function(a,b){return b.total-a.total;});
+  $('progress-earnings').innerHTML=allEarnList.length===0
     ?'<div style="color:var(--muted);font-size:13px;padding:8px 0">No confirmed earnings yet.</div>'
-    :'<div class="grid-3"><div class="card card-sm" style="text-align:center"><div style="font-size:22px;margin-bottom:6px">💰</div><div style="font-family:Syne,sans-serif;font-weight:800;font-size:22px;color:var(--accent3)">'+fmtMoney(myTotal)+'</div><div style="font-size:12px;color:var(--muted);margin-top:4px">Total confirmed</div></div><div class="card card-sm" style="text-align:center"><div style="font-size:22px;margin-bottom:6px">⚔️</div><div style="font-family:Syne,sans-serif;font-weight:800;font-size:22px;color:var(--accent)">'+fmtMoney(myEarnH2H)+'</div><div style="font-size:12px;color:var(--muted);margin-top:4px">H2H winnings</div></div><div class="card card-sm" style="text-align:center"><div style="font-size:22px;margin-bottom:6px">📉</div><div style="font-family:Syne,sans-serif;font-weight:800;font-size:22px;color:var(--accent2)">'+fmtMoney(myEarnBL)+'</div><div style="font-size:12px;color:var(--muted);margin-top:4px">Weekly bonus</div></div></div><div style="font-size:12px;color:var(--muted);margin-top:10px;padding:10px 14px;background:var(--bg3);border-radius:8px">Biggest Loser prize (45%+15%) confirmed at competition end.</div>';
+    :'<div style="margin-bottom:10px;font-size:12.5px;color:var(--muted)">Confirmed H2H winnings and weekly biggest loser bonuses. Biggest Loser prize shown at competition end.</div>'
+      +allEarnList.map(function(e,i){
+        var rankColor=i===0?'#f7d76a':i===1?'#c0c0c0':i===2?'#cd7f32':'var(--muted)';
+        var isMe=e.uid===_earnUid;
+        return'<div style="display:flex;align-items:center;gap:12px;padding:10px '+(isMe?'10px':'4px')+';border-bottom:1px solid var(--border);'+(isMe?'background:rgba(124,106,247,0.06);border-radius:8px;margin:2px 0':'')+'"><span style="font-family:Syne,sans-serif;font-weight:700;font-size:16px;width:24px;text-align:center;color:'+rankColor+'">'+(i+1)+'</span>'+avatar(nameFor(e.uid),32)+'<span style="flex:1;font-weight:500;font-size:13.5px">'+nameFor(e.uid)+(isMe?' <span class="tag">you</span>':'')+'</span><span style="font-family:Syne,sans-serif;font-weight:800;font-size:18px;color:var(--accent3)">'+fmtMoney(e.total)+'</span></div>';
+      }).join('')
+      +'<div style="font-size:12px;color:var(--muted);margin-top:10px;padding:10px 14px;background:var(--bg3);border-radius:8px">Biggest Loser prize (45%+15%) confirmed at competition end.</div>';
 
   // ── ACHIEVEMENTS ──────────────────────────────────────────
   var badges=calcAchievements(uid);
@@ -2539,7 +2529,7 @@ function renderProfilePage(){
   var dni=$('display-name-input'); if(dni&&!dni.value) dni.value=name;
   var photo = userProfile?.photoUrl || null;
   var photoEl=$('profile-avatar-img'),initEl=$('profile-avatar-init');
-  if(photoEl&&initEl){if(photo){photoEl.src=photo;photoEl.style.display='';initEl.style.display='none';}else{photoEl.style.display='none';initEl.style.display='';initEl.innerHTML='<span style="display:block;line-height:1;margin:auto">'+name.split(' ').map(function(w){return w[0];}).join('').substring(0,2).toUpperCase()+'</span>';}}
+  if(photoEl&&initEl){if(photo){photoEl.src=photo;photoEl.style.display='';initEl.style.display='none';}else{photoEl.style.display='none';initEl.style.display='';initEl.textContent=name.split(' ').map(function(w){return w[0];}).join('').substring(0,2).toUpperCase();}}
 
 
 
@@ -4131,7 +4121,7 @@ tr:hover td{background:var(--bg3)}
             <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px">
               <div style="position:relative;width:64px;height:64px;flex-shrink:0">
                 <img id="profile-avatar-img" src="" style="display:none;width:64px;height:64px;border-radius:50%;object-fit:cover;border:2px solid rgba(255,255,255,0.1)">
-                <div id="profile-avatar-init" style="width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:'Syne';font-weight:800;font-size:22px;background:rgba(124,106,247,0.2);color:var(--accent);line-height:64px;text-align:center;flex-shrink:0;overflow:hidden"></div>
+                <div id="profile-avatar-init" style="width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:'Syne';font-weight:800;font-size:22px;background:rgba(124,106,247,0.2);color:var(--accent);flex-shrink:0;overflow:hidden"></div>
               </div>
               <div>
                 <div style="font-family:'Syne';font-size:20px;font-weight:700" id="profile-name-display"></div>
