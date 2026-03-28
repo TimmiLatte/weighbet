@@ -310,103 +310,197 @@ function getWeeklyH2HPrize(w) {
     });
   }
 
+  // For the final week: H2H pays base prize only.
+  // The full accumulated pot + any final week no-shows go to BL prizes via getFinalWeekBonus.
+  if (w === weeks) return basePerWin;
+
   // Prize for week w: base + equal share of remaining pot spread across remaining weeks
   var weeksLeftNow = weeks - w; // weeks after w
-  var extraForW = weeksLeftNow >= 0 ? (unclaimedPot / (weeksLeftNow + 1)) / winnersPerWk : 0;
-  // Final week: unclaimed rolls to BL prizes, not H2H
-  if (w === weeks) extraForW = 0;
+  var extraForW = (unclaimedPot / (weeksLeftNow + 1)) / winnersPerWk;
   return basePerWin + extraForW;
 }
 
+// getAccumulatedPot: returns the unclaimed H2H pot built up through weeks 1 to (weeks-1).
+// Used by getFinalWeekBonus to ensure nothing is left over.
+function getAccumulatedPot() {
+  var pool = getPrizePool();
+  var weeks = currentComp?.weeks || 1;
+  var paying = payingCompetitors();
+  var winnersPerWk = Math.max(1, Math.floor(paying.length / 2));
+  var basePerWin = winnersPerWk > 0 ? (pool * 0.35 / weeks) / winnersPerWk : (pool * 0.35 / weeks);
+  var unclaimedPot = 0;
+
+  for (var pw = 1; pw < weeks; pw++) {
+    var weeksLeft = weeks - pw;
+    var extraPerWin = weeksLeft > 0 ? (unclaimedPot / weeksLeft) / winnersPerWk : 0;
+    var prizeThisWeek = basePerWin + extraPerWin;
+    if (weeksLeft > 0) unclaimedPot -= unclaimedPot / weeksLeft;
+
+    var weekMatchups = matchups.filter(function(m){ return m.week === pw; });
+    weekMatchups.forEach(function(m) {
+      var p1f = isFreePlayer(m.p1);
+      var p2f = m.p2 !== 'BYE' && isFreePlayer(m.p2);
+      if(p1f && p2f) return;
+      if(m.p2 === 'BYE') {
+        var p1pct = weeklyPctLost(m.p1, pw);
+        if(p1pct === null) { unclaimedPot += prizeThisWeek; return; }
+        var others = paying.filter(function(c){ return c.uid!==m.p1; })
+          .map(function(c){ return weeklyPctLost(c.uid,pw); })
+          .filter(function(v){ return v!==null; }).sort(function(a,b){ return a-b; });
+        var median = others.length ? others[Math.floor(others.length/2)] : null;
+        if(median !== null && p1pct <= median) unclaimedPot += prizeThisWeek;
+        return;
+      }
+      if(p1f !== p2f) {
+        var freeUid2 = p1f ? m.p1 : m.p2;
+        var payUid2  = p1f ? m.p2 : m.p1;
+        var fIn = didWeighIn(freeUid2, pw), pIn = didWeighIn(payUid2, pw);
+        if(!fIn && !pIn) { unclaimedPot += prizeThisWeek; return; }
+        if(!pIn) return;
+        var fPct = weeklyPctLost(freeUid2, pw), pPct = weeklyPctLost(payUid2, pw);
+        if(fIn && fPct !== null && pPct !== null && fPct >= pPct) unclaimedPot += prizeThisWeek;
+        return;
+      }
+      var p1in = didWeighIn(m.p1, pw), p2in = didWeighIn(m.p2, pw);
+      if(!p1in && !p2in) unclaimedPot += prizeThisWeek;
+    });
+  }
+  return unclaimedPot;
+}
+
 function h2hResult(m, w) {
-  var pool     = getPrizePool();
   var weeks    = currentComp?.weeks || 1;
   var isFinal  = w === weeks;
   var paying   = payingCompetitors();
-  var winnersPerWk = Math.max(1, Math.floor(paying.length / 2));
-  // Use redistributed prize amount for this week
+  // For final week, prize per win is calculated after distributing unclaimed among actual winners.
+  // We use basePerWin here; getFinalWeekPrize() adjusts the actual prize post-results.
   var prize    = getWeeklyH2HPrize(w);
 
   var p1Free   = isFreePlayer(m.p1);
   var p2Free   = m.p2 !== 'BYE' && isFreePlayer(m.p2);
-
-  // Determine effective prize: free vs free = no money; free wildcard vs paying = prize back to pool if free wins
   var prizeAtStake = (!p1Free && !p2Free && m.p2 !== 'BYE') ? prize : 0;
 
   if (m.p2 === 'BYE') {
-    // Odd competitor (always paying in this system) vs median of paying players
+    // Point 1: must beat MORE THAN HALF (strictly > median) to win.
     var p1pct   = weeklyPctLost(m.p1, w);
     var others  = paying.filter(c=>c.uid!==m.p1).map(c=>weeklyPctLost(c.uid,w)).filter(v=>v!==null).sort((a,b)=>a-b);
     var median  = others.length ? others[Math.floor(others.length/2)] : null;
-    var winner  = null, note = 'BYE - must beat median to win';
+    var winner  = null, note = 'BYE - must beat more than half of competitors';
     if (p1pct===null) { note = 'No weigh-in - prize back to pool'; }
     else if (median!==null) {
-      winner = p1pct>median ? m.p1 : null;
-      note   = p1pct>median ? 'Beat median ('+median.toFixed(2)+'%)' : 'Did not beat median ('+median.toFixed(2)+'%)';
+      winner = p1pct > median ? m.p1 : null;
+      note   = p1pct > median
+        ? 'Beat median ('+median.toFixed(2)+'%) — wins'
+        : 'Did not beat median ('+median.toFixed(2)+'%) — prize back to pool';
     }
-    return { week:w, p1:m.p1, p2:'BYE', winner, p1pct, p2pct:null, note, prize, prizeAtStake, matchType:'paying' };
+    return { week:w, p1:m.p1, p2:'BYE', winner, p1pct, p2pct:null, note, prize:winner?prize:0, prizeAtStake:prize, matchType:'paying' };
   }
 
-  // Wildcard: one free, one paying
+  // Point 2: Wildcard — one free, one paying
   if (p1Free !== p2Free) {
-    var freeUid    = p1Free ? m.p1 : m.p2;
-    var payingUid  = p1Free ? m.p2 : m.p1;
-    var freePct    = weeklyPctLost(freeUid, w);
-    var payingPct  = weeklyPctLost(payingUid, w);
-    var freeIn     = didWeighIn(freeUid, w);
-    var payingIn   = didWeighIn(payingUid, w);
-    var winner     = null, note = '', prizeWon = 0;
-    if (!freeIn && !payingIn)  { note = 'Both no-show - prize redistributed'; }
-    else if (!freeIn)          { winner = payingUid; prizeWon = prize; note = nameFor(freeUid)+' no-show - '+nameFor(payingUid)+' wins'; }
-    else if (!payingIn)        { winner = freeUid; note = nameFor(payingUid)+' no-show - '+nameFor(freeUid)+' wins (no prize - free player)'; }
-    else if (freePct >= payingPct) { winner = freeUid; note = nameFor(freeUid)+' wins (free player - prize back to pool)'; }
-    else                       { winner = payingUid; prizeWon = prize; note = nameFor(payingUid)+' wins'; }
+    var freeUid   = p1Free ? m.p1 : m.p2;
+    var payingUid = p1Free ? m.p2 : m.p1;
+    var freePct   = weeklyPctLost(freeUid, w);
+    var payingPct = weeklyPctLost(payingUid, w);
+    var freeIn    = didWeighIn(freeUid, w);
+    var payingIn  = didWeighIn(payingUid, w);
+    var winner = null, note = '', prizeWon = 0;
+    if (!freeIn && !payingIn)       { note = 'Both no-show - prize back to pool'; }
+    else if (!freeIn)               { winner = payingUid; prizeWon = prize; note = nameFor(freeUid)+' no-show - '+nameFor(payingUid)+' wins'; }
+    else if (!payingIn)             { winner = freeUid; note = nameFor(payingUid)+' no-show - '+nameFor(freeUid)+' wins (no prize - free player)'; }
+    else if (freePct === payingPct) { winner = payingUid; prizeWon = prize; note = 'Tie - '+nameFor(payingUid)+' wins prize (paying player)'; }
+    else if (freePct > payingPct)   { winner = freeUid; note = nameFor(freeUid)+' wins (free player - prize back to pool)'; }
+    else                            { winner = payingUid; prizeWon = prize; note = nameFor(payingUid)+' wins'; }
     var p1pct2 = weeklyPctLost(m.p1, w), p2pct2 = weeklyPctLost(m.p2, w);
     return { week:w, p1:m.p1, p2:m.p2, winner, p1pct:p1pct2, p2pct:p2pct2, note, prize:prizeWon, prizeAtStake:prize, matchType:'wildcard' };
   }
 
-  // Free vs free - bragging rights only
+  // Point 3: Free vs free — no prize, bragging rights only
   if (p1Free && p2Free) {
     var e1f=weeklyPctLost(m.p1,w), e2f=weeklyPctLost(m.p2,w);
     var p1inf=didWeighIn(m.p1,w), p2inf=didWeighIn(m.p2,w);
     var winnerF=null, noteF='Friendly match - no prize';
-    if (!p1inf&&!p2inf) { noteF='Both no-show'; }
-    else if (!p1inf)    { winnerF=m.p2; noteF=nameFor(m.p1)+' no-show - '+nameFor(m.p2)+' wins (bragging rights)'; }
-    else if (!p2inf)    { winnerF=m.p1; noteF=nameFor(m.p2)+' no-show - '+nameFor(m.p1)+' wins (bragging rights)'; }
-    else { winnerF=(e1f>=e2f)?m.p1:m.p2; noteF=nameFor(winnerF)+' wins (bragging rights)'; }
+    if (!p1inf&&!p2inf)   { noteF='Both no-show'; }
+    else if (!p1inf)      { winnerF=m.p2; noteF=nameFor(m.p1)+' no-show - '+nameFor(m.p2)+' wins (bragging rights)'; }
+    else if (!p2inf)      { winnerF=m.p1; noteF=nameFor(m.p2)+' no-show - '+nameFor(m.p1)+' wins (bragging rights)'; }
+    else if (e1f===e2f)   { noteF='Tie - bragging rights shared'; }
+    else { winnerF=(e1f>e2f)?m.p1:m.p2; noteF=nameFor(winnerF)+' wins (bragging rights)'; }
     return { week:w, p1:m.p1, p2:m.p2, winner:winnerF, p1pct:e1f, p2pct:e2f, note:noteF, prize:0, prizeAtStake:0, matchType:'free' };
   }
 
   // Standard paying vs paying
+  // Point 4: exact tie (full precision) — split prize equally
   var e1=weeklyPctLost(m.p1,w), e2=weeklyPctLost(m.p2,w);
   var p1in=didWeighIn(m.p1,w), p2in=didWeighIn(m.p2,w);
-  var winner=null, note='';
-  if (!p1in&&!p2in) { note='Both no-show - prize redistributed'; }
-  else if (!p1in)   { winner=m.p2; note=nameFor(m.p1)+' no-show - '+nameFor(m.p2)+' wins by default'; }
-  else if (!p2in)   { winner=m.p1; note=nameFor(m.p2)+' no-show - '+nameFor(m.p1)+' wins by default'; }
-  else { winner=(e1>=e2)?m.p1:m.p2; note=nameFor(winner)+' wins'; }
-  return { week:w, p1:m.p1, p2:m.p2, winner, p1pct:e1, p2pct:e2, note, prize, prizeAtStake:prize, matchType:'paying' };
+  var winner=null, note='', prizeWon=0;
+  if (!p1in&&!p2in) {
+    note='Both no-show - prize back to pool';
+  } else if (!p1in) {
+    winner=m.p2; prizeWon=prize; note=nameFor(m.p1)+' no-show - '+nameFor(m.p2)+' wins by default';
+  } else if (!p2in) {
+    winner=m.p1; prizeWon=prize; note=nameFor(m.p2)+' no-show - '+nameFor(m.p1)+' wins by default';
+  } else if (e1===e2) {
+    // Exact tie — both get half each; use tied:true so earnings code credits both
+    note='Exact tie — prize split equally';
+    return { week:w, p1:m.p1, p2:m.p2, winner:null, tied:true, p1pct:e1, p2pct:e2, note, prize:prize/2, prize1:prize/2, prize2:prize/2, prizeAtStake:prize, matchType:'paying' };
+  } else {
+    winner=(e1>e2)?m.p1:m.p2; prizeWon=prize;
+    note=nameFor(winner)+' wins';
+  }
+  return { week:w, p1:m.p1, p2:m.p2, winner, tied:false, p1pct:e1, p2pct:e2, note, prize:prizeWon, prizeAtStake:prize, matchType:'paying' };
 }
 function getAllH2HResults(w) { return matchups.filter(m=>m.week===w).map(m=>h2hResult(m,w)); }
 
 // Calculate how much unclaimed final-week money rolls to BL prizes
+// getFinalWeekPrize: for the final week, unclaimed prizes (no-shows, free wins, BYE fails)
+// are divided evenly among that week's actual paying winners instead of going to BL.
+// Returns the adjusted prize per winner for the final week.
+function getFinalWeekPrize() {
+  var weeks = currentComp?.weeks || 8;
+  var pool  = getPrizePool();
+  var paying = payingCompetitors();
+  var winnersPerWk = Math.max(1, Math.floor(paying.length / 2));
+  var basePerWin = winnersPerWk > 0 ? (pool * 0.35 / weeks) / winnersPerWk : (pool * 0.35 / weeks);
+
+  // Count the final week's actual paying winners and unclaimed slots
+  var results = getAllH2HResults(weeks);
+  var actualWinners = 0;
+  var unclaimedSlots = 0;
+  results.forEach(function(r) {
+    if (r.matchType === 'free') return; // no money involved
+    if (r.winner && !(isFreePlayer(r.winner) && r.matchType === 'wildcard')) {
+      actualWinners++;
+    } else {
+      unclaimedSlots++;
+    }
+    // Tied match: both count as winners
+    if (r.tied) { actualWinners++; }
+  });
+
+  if (actualWinners === 0) return basePerWin; // no winners — all goes to BL anyway
+  // Total available for final week = (all slots) * basePerWin
+  // Winners share the full pot including unclaimed slots
+  var totalFinalPot = winnersPerWk * basePerWin;
+  return totalFinalPot / actualWinners;
+}
+
+// getFinalWeekBonus: money added to BL prizes at the end.
+// This is only the accumulated pot from weeks 1-(weeks-1).
+// Final week H2H unclaimed goes to that week's winners instead (see getFinalWeekPrize).
+// Weekly BL bonus unclaimed in the final week still goes to BL.
 function getFinalWeekBonus() {
   var weeks = currentComp?.weeks || 8;
   var pool  = getPrizePool();
-  var weeklyH2HTotal = pool * 0.35 / weeks;
-  var results = getAllH2HResults(weeks);
-  var unclaimed = 0;
-  results.forEach(r => {
-    // Money unclaimed if: both no-show, free player wins paying match, BYE fails median
-    if (!r.winner || (r.winner && isFreePlayer(r.winner) && r.matchType === 'wildcard')) {
-      unclaimed += r.prizeAtStake || 0;
-    }
-  });
-  // Weekly BL bonus unclaimed if no paying player weighed in
+
+  // Accumulated pot from weeks 1 through (weeks-1)
+  var bonus = getAccumulatedPot();
+
+  // Weekly BL bonus unclaimed if no paying player weighed in during final week
   var wBL = pool * 0.05 / weeks;
   var payingWeighedIn = payingCompetitors().filter(c => didWeighIn(c.uid, weeks));
-  if (payingWeighedIn.length === 0) unclaimed += wBL;
-  return unclaimed;
+  if (payingWeighedIn.length === 0) bonus += wBL;
+
+  return bonus;
 }
 
 function getCompetitorStats() {
@@ -1877,12 +1971,20 @@ function renderPrizes(){
     '<div style="margin-top:14px;padding:12px 16px;background:var(--bg3);border-radius:9px;font-size:12.5px;color:var(--muted);line-height:1.7"><strong style="color:var(--text)">Rules:</strong> No-show = other competitor wins by default. Both no-show = prize redistributed to remaining weeks (or split to BL prizes in final week). Free player wins wildcard = prize back to pool. Odd paying player beats median to win.</div>'+
     freeNote + finalNote;
 
+  // Point 5: only count completed weeks (strictly < current week)
+  // Final week uses getFinalWeekPrize() so unclaimed slots boost winners, not BL
   var earnMap={};
-  var _wpp = Math.max(1, Math.floor(paying.length/2));
-  for(var w=1;w<=curWk;w++){
+  var _finalWeekPrize = getFinalWeekPrize();
+  for(var w=1;w<curWk;w++){
+    var _isFinalW = w === weeks;
     getAllH2HResults(w).forEach(r=>{
-      if(r.winner && r.prize > 0) {
-        earnMap[r.winner]=(earnMap[r.winner]||0)+r.prize;
+      var _prize = _isFinalW ? _finalWeekPrize : r.prize;
+      if(r.tied) {
+        // Split: both p1 and p2 get half
+        if(r.prize1 > 0) earnMap[r.p1]=(earnMap[r.p1]||0)+r.prize1;
+        if(r.prize2 > 0) earnMap[r.p2]=(earnMap[r.p2]||0)+r.prize2;
+      } else if(r.winner && _prize > 0) {
+        earnMap[r.winner]=(earnMap[r.winner]||0)+_prize;
       }
     });
     var wkBests=payingCompetitors().map(c=>({uid:c.uid,pct:weeklyPctLost(c.uid,w)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct);
@@ -2379,11 +2481,19 @@ function renderProgressPage(){
   var _earnUid = viewingUid();
   var _payingCount = payingCompetitors().length;
   var _wpp2 = Math.max(1, Math.floor(_payingCount/2));
+  // Point 5: only count completed weeks; final week uses adjusted prize
   var allEarnMap = {};
-  for(var ew=1;ew<=curWeek;ew++){
+  var _finalWkPrize = getFinalWeekPrize();
+  var _totalWeeks = currentComp?.weeks || 8;
+  for(var ew=1;ew<curWeek;ew++){
+    var _isFinalEw = ew === _totalWeeks;
     getAllH2HResults(ew).forEach(function(r){
-      if(r.winner && r.prize > 0){
-        allEarnMap[r.winner]=(allEarnMap[r.winner]||0)+r.prize;
+      var _ep = _isFinalEw ? _finalWkPrize : r.prize;
+      if(r.tied){
+        if(r.prize1 > 0) allEarnMap[r.p1]=(allEarnMap[r.p1]||0)+r.prize1;
+        if(r.prize2 > 0) allEarnMap[r.p2]=(allEarnMap[r.p2]||0)+r.prize2;
+      } else if(r.winner && _ep > 0){
+        allEarnMap[r.winner]=(allEarnMap[r.winner]||0)+_ep;
       }
     });
     var wkBests=payingCompetitors().map(function(c){return{uid:c.uid,pct:weeklyPctLost(c.uid,ew)};}).filter(function(x){return x.pct!=null;}).sort(function(a,b){return b.pct-a.pct;});
