@@ -143,6 +143,7 @@ const isTrueSuperAdmin = () => userProfile?.role === 'superAdmin';
 const viewingUid = () => (saGhostUid && compMembership?.userView) ? saGhostUid : currentUser?.uid;
 const isCompAdmin  = () => compMembership?.role === 'admin' || isSuperAdmin();
 const $ = id => document.getElementById(id);
+window.$ = $; // expose to non-module scripts and inline onclick handlers
 
 // ════════════════════════════════════════════════════════════
 // CALCULATION HELPERS
