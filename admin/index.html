@@ -1,0 +1,1397 @@
+<!DOCTYPE html>
+<!--
+  WeighBet Admin Panel
+  ====================
+  Separate admin interface — same Firebase project as the main app.
+  Hosted at: timmilatte.github.io/weighbet/admin/
+
+  Roles (stored in users/{uid}.role):
+    superAdmin  — full platform access
+    owner       — same as superAdmin but can transfer ownership,
+                  manage which SAs can approve new applications,
+                  and is the only one who can revoke other owners
+
+  Access flow:
+    1. Register with email/password
+    2. See "Access Pending" screen
+    3. Owner/approved SA reviews request and approves
+    4. Role set to superAdmin in Firestore
+    5. Full access granted
+
+  Owner is identified by role === 'owner' in Firestore.
+  Set manually once after first deployment:
+    Firebase Console → Firestore → users → {your uid} → role → "owner"
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WeighBet · Admin</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+
+<script type="module">
+import { initializeApp }           from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { getFirestore, doc, setDoc, getDoc, getDocs, addDoc, updateDoc, deleteDoc, collection, query, where, orderBy, serverTimestamp, writeBatch, limit } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+// ── PASTE YOUR FIREBASE CONFIG HERE ──────────────────────────
+const firebaseConfig = {
+  apiKey:            "AIzaSyB2WKhh1ezrPHSNoEPQb3POZJEccn2UmV0",
+  authDomain:        "weighbet.firebaseapp.com",
+  projectId:         "weighbet",
+  storageBucket:     "weighbet.firebasestorage.app",
+  messagingSenderId: "1090791593789",
+  appId:             "1:1090791593789:web:911672c0d7a44e3e98d754"
+};
+// ─────────────────────────────────────────────────────────────
+
+const app  = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db   = getFirestore(app);
+
+// ════════════════════════════════════════════════════════════
+// STATE
+// ════════════════════════════════════════════════════════════
+let currentUser    = null;
+let userProfile    = null;   // Firestore users/{uid}
+let isOwner        = false;  // role === 'owner'
+let canApprove     = false;  // owner or SA with canApproveRequests === true
+let activeTab      = 'dashboard';
+let allComps       = [];
+let allUsers       = [];
+let allBugReports  = [];
+let accessRequests = [];
+let viewingUser    = null;   // for "view as user" modal
+
+const $ = id => document.getElementById(id);
+
+// ════════════════════════════════════════════════════════════
+// AUTH
+// ════════════════════════════════════════════════════════════
+onAuthStateChanged(auth, async user => {
+  currentUser = user;
+  if(!user) { showScreen('auth'); return; }
+
+  // Load profile
+  const snap = await getDoc(doc(db, 'users', user.uid));
+  if(!snap.exists()) {
+    // New user — create pending request
+    await setDoc(doc(db, 'users', user.uid), {
+      displayName: user.displayName || user.email,
+      email: user.email,
+      role: 'pending',
+      requestedAt: serverTimestamp(),
+      createdAt: serverTimestamp(),
+    });
+    showScreen('pending');
+    return;
+  }
+
+  userProfile = snap.data();
+  const role = userProfile.role;
+
+  if(role === 'pending') { showScreen('pending'); return; }
+  if(role === 'rejected') { showScreen('rejected'); return; }
+  if(role !== 'superAdmin' && role !== 'owner') {
+    // Regular user account — not an admin
+    showScreen('not-admin');
+    return;
+  }
+
+  isOwner    = role === 'owner';
+  canApprove = isOwner || userProfile.canApproveRequests === true;
+
+  showScreen('app');
+  renderHeader();
+  switchTab('dashboard');
+  loadAccessRequests();
+});
+
+async function doLogin() {
+  const email = $('login-email').value.trim();
+  const pass  = $('login-pass').value;
+  try {
+    await signInWithEmailAndPassword(auth, email, pass);
+  } catch(e) {
+    showAuthError(friendlyError(e.code));
+  }
+}
+
+async function doRegister() {
+  const name  = $('reg-name').value.trim();
+  const email = $('reg-email').value.trim();
+  const pass  = $('reg-pass').value;
+  if(!name || !email || !pass) { showAuthError('Please fill in all fields'); return; }
+  if(pass.length < 6) { showAuthError('Password must be at least 6 characters'); return; }
+  try {
+    const cred = await createUserWithEmailAndPassword(auth, email, pass);
+    await updateProfile(cred.user, { displayName: name });
+  } catch(e) {
+    showAuthError(friendlyError(e.code));
+  }
+}
+
+function friendlyError(code) {
+  const map = {
+    'auth/user-not-found':      'No account found with this email',
+    'auth/wrong-password':      'Incorrect password',
+    'auth/email-already-in-use':'An account with this email already exists',
+    'auth/invalid-email':       'Please enter a valid email address',
+    'auth/too-many-requests':   'Too many attempts — please try again later',
+  };
+  return map[code] || 'Something went wrong. Please try again.';
+}
+
+function showAuthError(msg) {
+  const el = $('auth-error');
+  if(el) { el.textContent = msg; el.style.display = 'block'; }
+}
+
+window.doLogin    = doLogin;
+window.doRegister = doRegister;
+window.doSignOut  = async function() {
+  await signOut(auth);
+};
+window.showAuthTab = function(tab) {
+  $('login-form').style.display   = tab === 'login' ? '' : 'none';
+  $('register-form').style.display = tab === 'register' ? '' : 'none';
+  $('auth-tab-login').classList.toggle('active', tab === 'login');
+  $('auth-tab-register').classList.toggle('active', tab === 'register');
+  if($('auth-error')) $('auth-error').style.display = 'none';
+};
+
+// ════════════════════════════════════════════════════════════
+// SCREEN MANAGEMENT
+// ════════════════════════════════════════════════════════════
+function showScreen(id) {
+  ['auth','pending','rejected','not-admin','app'].forEach(s => {
+    const el = $(s + '-screen');
+    if(el) el.style.display = s === id ? '' : 'none';
+  });
+}
+
+// ════════════════════════════════════════════════════════════
+// HEADER
+// ════════════════════════════════════════════════════════════
+function renderHeader() {
+  const nameEl = $('header-name');
+  const roleEl = $('header-role');
+  if(nameEl) nameEl.textContent = userProfile?.displayName || currentUser?.email || '';
+  if(roleEl) roleEl.textContent = isOwner ? 'Owner' : 'Super Admin';
+}
+
+// ════════════════════════════════════════════════════════════
+// TAB NAVIGATION
+// ════════════════════════════════════════════════════════════
+window.switchTab = async function(tab) {
+  activeTab = tab;
+  document.querySelectorAll('.nav-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.tab === tab);
+  });
+  document.querySelectorAll('.tab-panel').forEach(el => {
+    el.style.display = el.dataset.tab === tab ? '' : 'none';
+  });
+  switch(tab) {
+    case 'dashboard':   await renderDashboard(); break;
+    case 'competitions': await loadComps(); break;
+    case 'users':       await loadUsers(); break;
+    case 'bugs':        await loadBugs(); break;
+    case 'access':      await renderAccessRequests(); break;
+    case 'settings':    renderSettings(); break;
+  }
+};
+
+// ════════════════════════════════════════════════════════════
+// DASHBOARD
+// ════════════════════════════════════════════════════════════
+async function renderDashboard() {
+  const el = $('dashboard-content');
+  if(!el) return;
+  el.innerHTML = '<div class="loading">Loading platform data...</div>';
+
+  try {
+    const [compsSnap, usersSnap, bugsSnap] = await Promise.all([
+      getDocs(collection(db, 'competitions')),
+      getDocs(collection(db, 'users')),
+      getDocs(query(collection(db, 'bugReports'), where('status', '==', 'open'))),
+    ]);
+
+    const comps    = compsSnap.docs.map(d => ({id: d.id, ...d.data()}));
+    const users    = usersSnap.docs.map(d => ({id: d.id, ...d.data()}));
+    const active   = comps.filter(c => !c.archived && !c.suspended);
+    const pending  = users.filter(u => u.role === 'pending');
+    const bugs     = bugsSnap.docs.length;
+
+    el.innerHTML = `
+      <div class="stat-grid">
+        <div class="stat-card">
+          <div class="stat-icon">🏆</div>
+          <div class="stat-value">${comps.length}</div>
+          <div class="stat-label">Total Competitions</div>
+          <div class="stat-sub">${active.length} active</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon">👥</div>
+          <div class="stat-value">${users.filter(u => u.role !== 'pending' && u.role !== 'rejected').length}</div>
+          <div class="stat-label">Registered Users</div>
+          <div class="stat-sub">all platforms</div>
+        </div>
+        <div class="stat-card ${pending.length > 0 ? 'stat-alert' : ''}">
+          <div class="stat-icon">⏳</div>
+          <div class="stat-value">${pending.length}</div>
+          <div class="stat-label">Access Requests</div>
+          <div class="stat-sub">${pending.length > 0 ? '<a href="#" onclick="switchTab(\'access\')" class="stat-link">Review now →</a>' : 'none pending'}</div>
+        </div>
+        <div class="stat-card ${bugs > 0 ? 'stat-warn' : ''}">
+          <div class="stat-icon">🐛</div>
+          <div class="stat-value">${bugs}</div>
+          <div class="stat-label">Open Bug Reports</div>
+          <div class="stat-sub">${bugs > 0 ? '<a href="#" onclick="switchTab(\'bugs\')" class="stat-link">Review →</a>' : 'all clear'}</div>
+        </div>
+      </div>
+      <div class="section-title" style="margin-top:32px">Recent Competitions</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>Started</th><th>Weeks</th><th>Members</th><th>Pool</th><th>Status</th></tr></thead>
+          <tbody>
+            ${comps.slice(0,10).map(c => `
+              <tr>
+                <td><strong>${c.name||'Unnamed'}</strong></td>
+                <td>${c.startDate||'-'}</td>
+                <td>${c.weeks||'-'}</td>
+                <td>-</td>
+                <td>${c.buyin ? '$'+(c.buyin*10) : '-'}</td>
+                <td>${c.archived ? '<span class="badge badge-muted">Archived</span>' : c.suspended ? '<span class="badge badge-danger">Suspended</span>' : '<span class="badge badge-success">Active</span>'}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  } catch(e) {
+    el.innerHTML = `<div class="error-msg">Error loading data: ${e.message}</div>`;
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// COMPETITIONS
+// ════════════════════════════════════════════════════════════
+async function loadComps() {
+  const el = $('competitions-content');
+  if(!el) return;
+  el.innerHTML = '<div class="loading">Loading competitions...</div>';
+  try {
+    const snap = await getDocs(query(collection(db, 'competitions'), orderBy('name')));
+    allComps = snap.docs.map(d => ({id: d.id, ...d.data()}));
+    renderComps();
+  } catch(e) {
+    el.innerHTML = `<div class="error-msg">${e.message}</div>`;
+  }
+}
+
+function renderComps(filter) {
+  const el = $('competitions-content');
+  if(!el) return;
+  const list = filter
+    ? allComps.filter(c => (c.name||'').toLowerCase().includes(filter) || (c.inviteCode||'').toLowerCase().includes(filter))
+    : allComps;
+
+  el.innerHTML = `
+    <div class="toolbar">
+      <input class="search-input" placeholder="Search by name or invite code..." oninput="renderComps(this.value.toLowerCase())">
+      <span class="toolbar-count">${list.length} competitions</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Name</th><th>Code</th><th>Start</th><th>Weeks</th><th>Buy-in</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>
+          ${list.map(c => `
+            <tr>
+              <td><strong>${c.name||'Unnamed'}</strong></td>
+              <td><code>${c.inviteCode||'-'}</code></td>
+              <td>${c.startDate||'-'}</td>
+              <td>${c.weeks||'-'}</td>
+              <td>${c.buyin ? '$'+c.buyin : 'Free'}</td>
+              <td>${c.archived ? '<span class="badge badge-muted">Archived</span>' : c.suspended ? '<span class="badge badge-danger">Suspended</span>' : '<span class="badge badge-success">Active</span>'}</td>
+              <td>
+                <div style="display:flex;gap:4px;flex-wrap:wrap">
+                  <button class="btn-sm btn-primary" onclick="viewCompDetail('${c.id}')">View</button>
+                  ${!c.suspended && !c.archived ? `<button class="btn-sm btn-danger" onclick="suspendComp('${c.id}', true)">Suspend</button>` : ''}
+                  ${c.suspended ? `<button class="btn-sm btn-success" onclick="suspendComp('${c.id}', false)">Unsuspend</button>` : ''}
+                  ${!c.archived ? `<button class="btn-sm btn-muted" onclick="archiveComp('${c.id}')">Archive</button>` : ''}
+                </div>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+window.renderComps    = renderComps;
+window.suspendComp    = async function(id, suspend) {
+  if(!confirm(`${suspend ? 'Suspend' : 'Unsuspend'} this competition?`)) return;
+  await updateDoc(doc(db, 'competitions', id), {suspended: suspend});
+  await loadComps();
+};
+window.archiveComp = async function(id) {
+  if(!confirm('Archive this competition? It will be hidden from the active list.')) return;
+  await updateDoc(doc(db, 'competitions', id), {archived: true, archivedAt: serverTimestamp()});
+  await loadComps();
+};
+window.viewCompDetail = async function(compId) {
+  const modal = $('comp-modal');
+  const body  = $('comp-modal-body');
+  if(!modal || !body) return;
+  body.innerHTML = '<div class="loading">Loading...</div>';
+  modal.style.display = 'flex';
+
+  try {
+    const [compSnap, membersSnap, weighinsSnap] = await Promise.all([
+      getDoc(doc(db, 'competitions', compId)),
+      getDocs(collection(db, 'competitions', compId, 'members')),
+      getDocs(collection(db, 'competitions', compId, 'weighins')),
+    ]);
+    const comp    = compSnap.data();
+    const members = membersSnap.docs.map(d => ({uid: d.id, ...d.data()}));
+    const weighins = weighinsSnap.docs.length;
+
+    body.innerHTML = `
+      <h2 style="font-family:Syne,sans-serif;font-weight:800;font-size:22px;margin-bottom:4px">${comp.name}</h2>
+      <p style="color:var(--muted);margin-bottom:20px">Start: ${comp.startDate} · ${comp.weeks} weeks · $${comp.buyin||0} buy-in · Code: <code>${comp.inviteCode}</code></p>
+      <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:20px">
+        <div class="stat-card"><div class="stat-value">${members.length}</div><div class="stat-label">Members</div></div>
+        <div class="stat-card"><div class="stat-value">${members.filter(m=>m.playerType!=='free').length}</div><div class="stat-label">Paying</div></div>
+        <div class="stat-card"><div class="stat-value">${weighins}</div><div class="stat-label">Weigh-ins</div></div>
+      </div>
+      <div class="section-title">Members</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>Role</th><th>Type</th><th>Weigh-ins</th><th>Total %</th></tr></thead>
+          <tbody>
+            ${members.sort((a,b)=>(b.totalPct||0)-(a.totalPct||0)).map(m => `
+              <tr>
+                <td><strong>${m.displayName||'Unknown'}</strong></td>
+                <td>${m.role||'competitor'}</td>
+                <td>${m.playerType==='free' ? '<span class="badge badge-muted">Free</span>' : '<span class="badge badge-success">Paying</span>'}</td>
+                <td>${m.weighInCount||0}</td>
+                <td>${m.totalPct!=null ? m.totalPct.toFixed(2)+'%' : '-'}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  } catch(e) {
+    body.innerHTML = `<div class="error-msg">${e.message}</div>`;
+  }
+};
+
+// ════════════════════════════════════════════════════════════
+// USERS
+// ════════════════════════════════════════════════════════════
+async function loadUsers() {
+  const el = $('users-content');
+  if(!el) return;
+  el.innerHTML = '<div class="loading">Loading users...</div>';
+  try {
+    const snap = await getDocs(query(collection(db, 'users'), orderBy('displayName')));
+    allUsers = snap.docs.map(d => ({id: d.id, ...d.data()})).filter(u => u.role !== 'pending' && u.role !== 'rejected');
+    renderUsers();
+  } catch(e) {
+    el.innerHTML = `<div class="error-msg">${e.message}</div>`;
+  }
+}
+
+function renderUsers(filter) {
+  const el = $('users-content');
+  if(!el) return;
+  const list = filter
+    ? allUsers.filter(u => (u.displayName||'').toLowerCase().includes(filter) || (u.email||'').toLowerCase().includes(filter))
+    : allUsers;
+
+  el.innerHTML = `
+    <div class="toolbar">
+      <input class="search-input" placeholder="Search by name or email..." oninput="renderUsers(this.value.toLowerCase())">
+      <span class="toolbar-count">${list.length} users</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Joined</th><th>Actions</th></tr></thead>
+        <tbody>
+          ${list.map(u => {
+            const ts = u.createdAt?.toDate ? u.createdAt.toDate().toLocaleDateString() : '-';
+            const roleBadge = u.role === 'owner' ? '<span class="badge badge-owner">Owner</span>'
+              : u.role === 'superAdmin' ? '<span class="badge badge-admin">Super Admin</span>'
+              : '<span class="badge badge-muted">User</span>';
+            return `<tr>
+              <td><strong>${u.displayName||'Unknown'}</strong></td>
+              <td style="color:var(--muted)">${u.email||'-'}</td>
+              <td>${roleBadge}</td>
+              <td style="color:var(--muted)">${ts}</td>
+              <td>
+                <div style="display:flex;gap:4px;flex-wrap:wrap">
+                  <button class="btn-sm btn-primary" onclick="viewUserDetail('${u.id}')">View</button>
+                  ${isOwner && u.role !== 'owner' ? `<button class="btn-sm btn-warning" onclick="transferOwnership('${u.id}','${(u.displayName||'').replace(/'/g,'\\'')}')">Make Owner</button>` : ''}
+                </div>
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+window.renderUsers = renderUsers;
+
+window.viewUserDetail = async function(uid) {
+  const modal = $('user-modal');
+  const body  = $('user-modal-body');
+  if(!modal || !body) return;
+  body.innerHTML = '<div class="loading">Loading...</div>';
+  modal.style.display = 'flex';
+
+  try {
+    const userSnap = await getDoc(doc(db, 'users', uid));
+    const u = {id: uid, ...userSnap.data()};
+    const memSnap = await getDocs(query(collection(db, 'competitionMembers'), where('userId', '==', uid)));
+    const comps   = memSnap.docs.map(d => d.data());
+
+    body.innerHTML = `
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px">
+        <div class="avatar-lg">${(u.displayName||'?')[0].toUpperCase()}</div>
+        <div>
+          <h2 style="font-family:Syne,sans-serif;font-weight:800;font-size:20px;margin-bottom:2px">${u.displayName||'Unknown'}</h2>
+          <p style="color:var(--muted)">${u.email||''}</p>
+          <span class="badge ${u.role==='owner'?'badge-owner':u.role==='superAdmin'?'badge-admin':'badge-muted'}">${u.role||'user'}</span>
+        </div>
+      </div>
+      <div class="section-title">Competitions (${comps.length})</div>
+      ${comps.length === 0 ? '<p style="color:var(--muted)">No competitions</p>' : `
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Competition</th><th>Role</th><th>Status</th></tr></thead>
+            <tbody>
+              ${comps.map(c => `<tr>
+                <td>${c.compName||'Unknown'}</td>
+                <td>${c.role||'competitor'}</td>
+                <td>${c.archived ? 'Archived' : 'Active'}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`}`;
+  } catch(e) {
+    body.innerHTML = `<div class="error-msg">${e.message}</div>`;
+  }
+};
+
+window.transferOwnership = async function(uid, name) {
+  if(!isOwner) return;
+  if(!confirm(`Transfer ownership to ${name}? You will become a regular Super Admin and they will become the Owner. This cannot be undone without their cooperation.`)) return;
+  try {
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'users', currentUser.uid), {role: 'superAdmin'});
+    batch.update(doc(db, 'users', uid), {role: 'owner'});
+    await batch.commit();
+    alert('Ownership transferred. You are now a Super Admin.');
+    await signOut(auth);
+  } catch(e) {
+    alert('Error: ' + e.message);
+  }
+};
+
+// ════════════════════════════════════════════════════════════
+// BUG REPORTS
+// ════════════════════════════════════════════════════════════
+async function loadBugs() {
+  const el = $('bugs-content');
+  if(!el) return;
+  el.innerHTML = '<div class="loading">Loading bug reports...</div>';
+  try {
+    const snap = await getDocs(query(collection(db, 'bugReports'), orderBy('ts', 'desc')));
+    allBugReports = snap.docs.map(d => ({id: d.id, ...d.data()}));
+    renderBugs();
+  } catch(e) {
+    el.innerHTML = `<div class="error-msg">${e.message}</div>`;
+  }
+}
+
+function renderBugs(showResolved) {
+  const el = $('bugs-content');
+  if(!el) return;
+  const open     = allBugReports.filter(b => b.status !== 'resolved');
+  const resolved = allBugReports.filter(b => b.status === 'resolved');
+  const list     = showResolved ? [...open, ...resolved] : open;
+
+  el.innerHTML = `
+    <div class="toolbar">
+      <span class="toolbar-count">${open.length} open · ${resolved.length} resolved</span>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);cursor:pointer">
+        <input type="checkbox" onchange="renderBugs(this.checked)" ${showResolved?'checked':''}> Show resolved
+      </label>
+      <button class="btn-sm btn-primary" onclick="loadBugs()">🔄 Refresh</button>
+    </div>
+    ${list.length === 0 ? '<div class="empty-state"><div style="font-size:40px">🎉</div><p>No bug reports</p></div>' : ''}
+    ${list.map(b => bugCard(b)).join('')}`;
+}
+
+function bugCard(b) {
+  const ts = b.ts?.toDate ? b.ts.toDate().toLocaleString() : '-';
+  const sev = b.severity || 'minor';
+  const sevClass = sev === 'critical' ? 'badge-danger' : sev === 'major' ? 'badge-warning' : 'badge-muted';
+  const isResolved = b.status === 'resolved';
+  const hasNote = b.adminNote?.trim();
+  return `
+    <div class="bug-card ${isResolved ? 'bug-resolved' : ''}">
+      <div class="bug-header">
+        <div>
+          <div class="bug-title">${b.title||'Untitled'}</div>
+          <div class="bug-desc">${b.description||'No description'}</div>
+        </div>
+        <span class="badge ${sevClass}">${sev}</span>
+      </div>
+      <div class="bug-meta">
+        👤 ${b.userName||'Unknown'}
+        ${b.compName ? ` · 🏆 ${b.compName}` : ''}
+        · 🕐 ${ts}
+        ${b.appVersion ? ` · v${b.appVersion}` : ''}
+      </div>
+      ${hasNote ? `
+        <div class="bug-note">
+          <div style="font-size:11px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">
+            📬 Your note ${b.adminNoteRead ? '· <span style="color:var(--success)">seen ✓</span>' : '· <span style="color:var(--warning)">unread</span>'}
+          </div>
+          <div style="font-size:13px">${b.adminNote}</div>
+          <button class="btn-sm btn-muted" style="margin-top:8px" onclick="clearBugNote('${b.id}')">Remove note</button>
+        </div>` : ''}
+      <div class="bug-note-form" id="note-form-${b.id}">
+        <textarea id="note-ta-${b.id}" placeholder="Write a note to the user (e.g. can you share a screenshot?)" rows="2"></textarea>
+        <button class="btn-sm btn-primary" onclick="sendBugNote('${b.id}')">📨 Send note</button>
+      </div>
+      <div class="bug-actions">
+        ${!isResolved
+          ? `<button class="btn-sm btn-success" onclick="resolveBug('${b.id}')">✅ Resolve</button>`
+          : `<button class="btn-sm btn-warning" onclick="reopenBug('${b.id}')">↩ Reopen</button>`}
+        <button class="btn-sm btn-danger" onclick="deleteBug('${b.id}')">🗑️ Delete</button>
+        ${hasNote ? `<button class="btn-sm btn-muted" onclick="toggleNoteForm('${b.id}')">✏️ Edit note</button>` : ''}
+      </div>
+    </div>`;
+}
+
+window.renderBugs      = renderBugs;
+window.toggleNoteForm  = id => { const el = $('note-form-'+id); if(el) el.style.display = el.style.display==='none'?'':'none'; };
+window.sendBugNote     = async function(id) {
+  const ta = $('note-ta-'+id);
+  const note = ta?.value.trim();
+  if(!note) return;
+  await updateDoc(doc(db,'bugReports',id), {adminNote:note, adminNoteRead:false, adminNoteTs:serverTimestamp()});
+  await loadBugs();
+};
+window.clearBugNote    = async function(id) {
+  if(!confirm('Remove this note?')) return;
+  await updateDoc(doc(db,'bugReports',id), {adminNote:null, adminNoteRead:null});
+  await loadBugs();
+};
+window.resolveBug      = async function(id) {
+  await updateDoc(doc(db,'bugReports',id), {status:'resolved', resolvedAt:serverTimestamp()});
+  await loadBugs();
+};
+window.reopenBug       = async function(id) {
+  await updateDoc(doc(db,'bugReports',id), {status:'open', resolvedAt:null});
+  await loadBugs();
+};
+window.deleteBug       = async function(id) {
+  if(!confirm('Permanently delete this bug report?')) return;
+  await deleteDoc(doc(db,'bugReports',id));
+  await loadBugs();
+};
+
+// ════════════════════════════════════════════════════════════
+// ACCESS REQUESTS
+// ════════════════════════════════════════════════════════════
+async function loadAccessRequests() {
+  try {
+    const snap = await getDocs(query(collection(db,'users'), where('role','==','pending')));
+    accessRequests = snap.docs.map(d => ({id:d.id,...d.data()}));
+    // Update badge
+    const badge = $('access-badge');
+    if(badge) { badge.textContent = accessRequests.length; badge.style.display = accessRequests.length > 0 ? '' : 'none'; }
+  } catch(e) {}
+}
+
+async function renderAccessRequests() {
+  const el = $('access-content');
+  if(!el) return;
+  await loadAccessRequests();
+
+  el.innerHTML = `
+    <div class="section-title">Pending Requests (${accessRequests.length})</div>
+    ${accessRequests.length === 0
+      ? '<div class="empty-state"><div style="font-size:40px">✅</div><p>No pending requests</p></div>'
+      : accessRequests.map(u => {
+          const ts = u.requestedAt?.toDate ? u.requestedAt.toDate().toLocaleString() : '-';
+          return `
+            <div class="bug-card">
+              <div class="bug-header">
+                <div>
+                  <div class="bug-title">${u.displayName||'Unknown'}</div>
+                  <div class="bug-desc">${u.email||'-'} · Requested ${ts}</div>
+                </div>
+              </div>
+              <div class="bug-actions">
+                ${canApprove ? `<button class="btn-sm btn-success" onclick="approveRequest('${u.id}','${(u.displayName||'').replace(/'/g,'\\'')}')">✅ Approve</button>` : ''}
+                <button class="btn-sm btn-danger" onclick="rejectRequest('${u.id}','${(u.displayName||'').replace(/'/g,'\\'')}')">❌ Reject</button>
+              </div>
+            </div>`;
+        }).join('')}
+    ${isOwner ? `
+      <div class="section-title" style="margin-top:32px">Super Admin Accounts</div>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:16px">Control which super admins can approve new access requests.</p>
+      <div id="sa-list">Loading...</div>` : ''}`;
+
+  if(isOwner) loadSAList();
+}
+
+async function loadSAList() {
+  const el = $('sa-list');
+  if(!el) return;
+  const snap = await getDocs(query(collection(db,'users'), where('role','in',['superAdmin','owner'])));
+  const admins = snap.docs.map(d => ({id:d.id,...d.data()}));
+  el.innerHTML = `
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Can Approve</th><th>Actions</th></tr></thead>
+        <tbody>
+          ${admins.map(a => `<tr>
+            <td><strong>${a.displayName||'Unknown'}</strong></td>
+            <td style="color:var(--muted)">${a.email||'-'}</td>
+            <td><span class="badge ${a.role==='owner'?'badge-owner':'badge-admin'}">${a.role}</span></td>
+            <td>${a.role==='owner' ? '✅ Always' : (a.canApproveRequests ? '✅ Yes' : '❌ No')}</td>
+            <td>
+              ${a.role !== 'owner' && a.id !== currentUser.uid ? `
+                <button class="btn-sm ${a.canApproveRequests?'btn-warning':'btn-success'}" onclick="toggleApprovePermission('${a.id}',${!a.canApproveRequests})">
+                  ${a.canApproveRequests ? 'Revoke approve' : 'Grant approve'}
+                </button>
+                <button class="btn-sm btn-danger" onclick="revokeAdmin('${a.id}','${(a.displayName||'').replace(/'/g,'\\'')}')">Revoke SA</button>
+              ` : ''}
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+window.approveRequest = async function(uid, name) {
+  if(!canApprove) { alert('You do not have permission to approve requests.'); return; }
+  if(!confirm(`Approve admin access for ${name}?`)) return;
+  await updateDoc(doc(db,'users',uid), {role:'superAdmin', approvedAt:serverTimestamp(), approvedBy:currentUser.uid, canApproveRequests:false});
+  await renderAccessRequests();
+};
+window.rejectRequest = async function(uid, name) {
+  if(!confirm(`Reject access request from ${name}? They will see a rejection message.`)) return;
+  await updateDoc(doc(db,'users',uid), {role:'rejected', rejectedAt:serverTimestamp()});
+  await renderAccessRequests();
+};
+window.toggleApprovePermission = async function(uid, grant) {
+  await updateDoc(doc(db,'users',uid), {canApproveRequests:grant});
+  await loadSAList();
+};
+window.revokeAdmin = async function(uid, name) {
+  if(!confirm(`Revoke super admin access from ${name}? They will no longer be able to log into the admin panel.`)) return;
+  await updateDoc(doc(db,'users',uid), {role:'user', canApproveRequests:false});
+  await loadSAList();
+};
+
+// ════════════════════════════════════════════════════════════
+// SETTINGS
+// ════════════════════════════════════════════════════════════
+function renderSettings() {
+  const el = $('settings-content');
+  if(!el) return;
+  el.innerHTML = `
+    <div class="section-title">My Account</div>
+    <div class="card" style="max-width:480px">
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px">
+        <div class="avatar-lg">${(userProfile?.displayName||'?')[0].toUpperCase()}</div>
+        <div>
+          <div style="font-family:Syne,sans-serif;font-weight:700;font-size:18px">${userProfile?.displayName||''}</div>
+          <div style="color:var(--muted);font-size:13px">${currentUser?.email||''}</div>
+          <span class="badge ${isOwner?'badge-owner':'badge-admin'}" style="margin-top:4px">${isOwner?'Owner':'Super Admin'}</span>
+        </div>
+      </div>
+      <button class="btn-danger" onclick="doSignOut()">⏻ Sign Out</button>
+    </div>
+    ${isOwner ? `
+      <div class="section-title" style="margin-top:32px">Ownership Transfer</div>
+      <div class="card" style="max-width:480px">
+        <p style="color:var(--muted);font-size:13px;margin-bottom:12px">Transfer ownership to another super admin. You will become a regular super admin. This is permanent unless the new owner transfers it back.</p>
+        <p style="font-size:13px">Go to the <a href="#" onclick="switchTab('users')" style="color:var(--accent)">Users tab</a> to find the person and click "Make Owner".</p>
+      </div>` : ''}`;
+}
+
+// ════════════════════════════════════════════════════════════
+// MODAL CLOSE
+// ════════════════════════════════════════════════════════════
+window.closeModal = function(id) {
+  const el = $(id);
+  if(el) el.style.display = 'none';
+};
+</script>
+
+<style>
+/* ════════════════════════════════════════════════════════════
+   WEIGHBET ADMIN — Dark monochrome with amber accent
+   Fonts: Syne (display) + DM Mono (code/data) + DM Sans (body)
+   ════════════════════════════════════════════════════════════ */
+:root {
+  --bg:      #0d0d0f;
+  --bg2:     #13131a;
+  --bg3:     #1a1a24;
+  --bg4:     #22222e;
+  --border:  rgba(255,255,255,0.07);
+  --border2: rgba(255,255,255,0.12);
+  --text:    #f0f0f4;
+  --muted:   #6b6b80;
+  --accent:  #e8a838;   /* amber — distinct from app's purple */
+  --accent2: #f0c060;
+  --success: #5fd4b3;
+  --danger:  #e05252;
+  --warning: #f7b26a;
+  --owner:   #c084fc;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'DM Sans', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  min-height: 100vh;
+}
+
+/* ── AUTH SCREEN ──────────────────────────────────────────── */
+#auth-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: radial-gradient(ellipse at 30% 20%, rgba(232,168,56,0.08) 0%, transparent 60%),
+              radial-gradient(ellipse at 70% 80%, rgba(232,168,56,0.05) 0%, transparent 50%);
+}
+
+.auth-box {
+  width: 100%;
+  max-width: 400px;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 20px;
+  padding: 36px;
+}
+
+.auth-logo {
+  text-align: center;
+  margin-bottom: 28px;
+}
+
+.auth-logo-mark {
+  font-size: 36px;
+  margin-bottom: 8px;
+}
+
+.auth-logo-title {
+  font-family: 'Syne', sans-serif;
+  font-weight: 800;
+  font-size: 22px;
+  letter-spacing: -0.5px;
+}
+
+.auth-logo-sub {
+  font-size: 12px;
+  color: var(--accent);
+  font-family: 'DM Mono', monospace;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  margin-top: 2px;
+}
+
+.auth-tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--bg3);
+  border-radius: 10px;
+  padding: 3px;
+  margin-bottom: 24px;
+}
+
+.auth-tab {
+  flex: 1;
+  padding: 8px;
+  text-align: center;
+  cursor: pointer;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  border: none;
+  background: none;
+  transition: all .15s;
+}
+.auth-tab.active { background: var(--bg4); color: var(--text); }
+
+.form-group { margin-bottom: 14px; }
+.form-group label { display: block; font-size: 12px; font-weight: 500; color: var(--muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.5px; }
+.form-group input {
+  width: 100%; background: var(--bg3); border: 1px solid var(--border2);
+  border-radius: 9px; color: var(--text); padding: 10px 14px;
+  font-family: 'DM Sans', sans-serif; font-size: 14px; outline: none;
+  transition: border-color .15s;
+}
+.form-group input:focus { border-color: var(--accent); }
+
+.btn-full {
+  width: 100%; padding: 12px; border-radius: 10px; border: none; cursor: pointer;
+  font-family: 'Syne', sans-serif; font-weight: 700; font-size: 14px;
+  background: var(--accent); color: #0d0d0f; transition: opacity .15s;
+}
+.btn-full:hover { opacity: 0.9; }
+
+#auth-error {
+  display: none; background: rgba(224,82,82,0.1); border: 1px solid rgba(224,82,82,0.3);
+  border-radius: 8px; padding: 10px 12px; font-size: 13px; color: var(--danger);
+  margin-bottom: 14px;
+}
+
+/* ── INFO SCREENS ─────────────────────────────────────────── */
+.info-screen {
+  min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.info-box {
+  max-width: 440px; text-align: center; background: var(--bg2);
+  border: 1px solid var(--border2); border-radius: 20px; padding: 40px 36px;
+}
+.info-icon { font-size: 48px; margin-bottom: 16px; }
+.info-title { font-family: 'Syne', sans-serif; font-weight: 800; font-size: 22px; margin-bottom: 8px; }
+.info-desc { color: var(--muted); font-size: 14px; line-height: 1.6; margin-bottom: 20px; }
+
+/* ── APP SHELL ────────────────────────────────────────────── */
+#app-screen { display: none; min-height: 100vh; display: flex; flex-direction: column; }
+
+/* Header */
+.app-header {
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.header-logo {
+  font-family: 'Syne', sans-serif;
+  font-weight: 800;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.header-logo-accent {
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  color: var(--accent);
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  background: rgba(232,168,56,0.1);
+  border: 1px solid rgba(232,168,56,0.2);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.header-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.header-avatar {
+  width: 30px; height: 30px; border-radius: 50%;
+  background: rgba(232,168,56,0.15);
+  border: 1px solid rgba(232,168,56,0.3);
+  color: var(--accent);
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'Syne', sans-serif; font-weight: 700; font-size: 12px;
+}
+
+/* Layout */
+.app-body { display: flex; flex: 1; }
+
+/* Sidebar */
+.sidebar {
+  width: 220px;
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  padding: 20px 0;
+  flex-shrink: 0;
+  position: sticky;
+  top: 56px;
+  height: calc(100vh - 56px);
+  overflow-y: auto;
+}
+
+.nav-section {
+  padding: 4px 12px 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 16px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13.5px;
+  font-weight: 500;
+  border: none;
+  background: none;
+  width: 100%;
+  text-align: left;
+  border-radius: 0;
+  transition: all .15s;
+  position: relative;
+}
+.nav-item:hover { color: var(--text); background: rgba(255,255,255,0.03); }
+.nav-item.active { color: var(--accent); background: rgba(232,168,56,0.08); }
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 4px; bottom: 4px;
+  width: 3px;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
+}
+
+.nav-badge {
+  margin-left: auto;
+  background: var(--danger);
+  color: #fff;
+  border-radius: 99px;
+  font-size: 10px;
+  padding: 1px 6px;
+  font-weight: 700;
+  display: none;
+}
+
+/* Main content */
+.main-content { flex: 1; padding: 28px 32px; overflow-y: auto; }
+
+.page-title {
+  font-family: 'Syne', sans-serif;
+  font-weight: 800;
+  font-size: 24px;
+  margin-bottom: 4px;
+}
+.page-sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+
+/* Tab panels */
+.tab-panel { display: none; }
+
+/* ── COMPONENTS ───────────────────────────────────────────── */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 28px;
+}
+
+.stat-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+  transition: border-color .15s;
+}
+.stat-card.stat-alert { border-color: rgba(224,82,82,0.4); }
+.stat-card.stat-warn  { border-color: rgba(247,178,106,0.4); }
+
+.stat-icon { font-size: 22px; margin-bottom: 10px; }
+.stat-value { font-family: 'Syne', sans-serif; font-weight: 800; font-size: 28px; margin-bottom: 2px; }
+.stat-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); font-weight: 600; }
+.stat-sub   { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.stat-link  { color: var(--accent); text-decoration: none; }
+
+.section-title {
+  font-family: 'Syne', sans-serif;
+  font-weight: 700;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.toolbar-count { color: var(--muted); font-size: 13px; }
+
+.search-input {
+  flex: 1;
+  min-width: 200px;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 9px;
+  color: var(--text);
+  padding: 8px 14px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 13px;
+  outline: none;
+}
+.search-input:focus { border-color: var(--accent); }
+
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  vertical-align: middle;
+}
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: rgba(255,255,255,0.02); }
+
+code {
+  font-family: 'DM Mono', monospace;
+  font-size: 12px;
+  background: var(--bg3);
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--accent);
+}
+
+/* Badges */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.badge-success { background: rgba(95,212,179,0.15); color: var(--success); }
+.badge-danger  { background: rgba(224,82,82,0.15);  color: var(--danger); }
+.badge-warning { background: rgba(247,178,106,0.15);color: var(--warning); }
+.badge-muted   { background: rgba(255,255,255,0.06);color: var(--muted); }
+.badge-admin   { background: rgba(232,168,56,0.15); color: var(--accent); }
+.badge-owner   { background: rgba(192,132,252,0.15);color: var(--owner); }
+
+/* Buttons */
+.btn-sm {
+  padding: 5px 10px;
+  border-radius: 7px;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: 'DM Sans', sans-serif;
+  transition: opacity .15s;
+  white-space: nowrap;
+}
+.btn-sm:hover { opacity: 0.85; }
+.btn-primary { background: rgba(232,168,56,0.2);  color: var(--accent); }
+.btn-success { background: rgba(95,212,179,0.15); color: var(--success); }
+.btn-danger  { background: rgba(224,82,82,0.15);  color: var(--danger); }
+.btn-warning { background: rgba(247,178,106,0.15);color: var(--warning); }
+.btn-muted   { background: rgba(255,255,255,0.06);color: var(--muted); }
+
+.btn-danger {
+  padding: 9px 18px;
+  border-radius: 9px;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: 'DM Sans', sans-serif;
+  background: rgba(224,82,82,0.15);
+  color: var(--danger);
+}
+
+/* Bug cards */
+.bug-card {
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 10px;
+}
+.bug-card.bug-resolved { opacity: 0.5; }
+.bug-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.bug-title  { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+.bug-desc   { font-size: 13px; color: var(--muted); line-height: 1.5; }
+.bug-meta   { font-size: 11px; color: var(--muted); margin-bottom: 10px; }
+.bug-note   { background: rgba(232,168,56,0.06); border: 1px solid rgba(232,168,56,0.15); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+.bug-note-form { margin-bottom: 10px; }
+.bug-note-form textarea {
+  width: 100%; background: var(--bg3); border: 1px solid var(--border2);
+  border-radius: 8px; color: var(--text); padding: 8px 10px;
+  font-family: 'DM Sans', sans-serif; font-size: 13px;
+  outline: none; resize: none; margin-bottom: 6px;
+}
+.bug-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* Modal */
+.modal-overlay {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.7);
+  z-index: 100;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.modal-box {
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 16px;
+  padding: 24px;
+  width: 100%;
+  max-width: 640px;
+  max-height: 80vh;
+  overflow-y: auto;
+  position: relative;
+}
+.modal-close {
+  position: absolute; top: 16px; right: 16px;
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  font-size: 20px; padding: 4px;
+}
+
+/* Avatar */
+.avatar-lg {
+  width: 52px; height: 52px; border-radius: 50%;
+  background: rgba(232,168,56,0.15);
+  border: 1px solid rgba(232,168,56,0.3);
+  color: var(--accent);
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'Syne', sans-serif; font-weight: 800; font-size: 20px;
+  flex-shrink: 0;
+}
+
+/* States */
+.loading     { color: var(--muted); padding: 40px; text-align: center; }
+.error-msg   { color: var(--danger); padding: 16px; background: rgba(224,82,82,0.08); border-radius: 8px; }
+.empty-state { text-align: center; padding: 48px 20px; color: var(--muted); }
+.empty-state p { margin-top: 8px; }
+
+@media (max-width: 900px) {
+  .stat-grid { grid-template-columns: repeat(2,1fr); }
+  .sidebar { display: none; }
+  .main-content { padding: 20px 16px; }
+}
+</style>
+</head>
+<body>
+
+<!-- AUTH SCREEN -->
+<div id="auth-screen">
+  <div class="auth-box">
+    <div class="auth-logo">
+      <div class="auth-logo-mark">⚖️</div>
+      <div class="auth-logo-title">WeighBet</div>
+      <div class="auth-logo-sub">Admin Panel</div>
+    </div>
+
+    <div class="auth-tabs">
+      <button class="auth-tab active" id="auth-tab-login" onclick="showAuthTab('login')">Sign In</button>
+      <button class="auth-tab" id="auth-tab-register" onclick="showAuthTab('register')">Request Access</button>
+    </div>
+
+    <div id="auth-error"></div>
+
+    <!-- Login form -->
+    <div id="login-form">
+      <div class="form-group"><label>Email</label><input type="email" id="login-email" placeholder="admin@example.com" onkeydown="if(event.key==='Enter')doLogin()"></div>
+      <div class="form-group"><label>Password</label><input type="password" id="login-pass" placeholder="Password" onkeydown="if(event.key==='Enter')doLogin()"></div>
+      <button class="btn-full" onclick="doLogin()">Sign In →</button>
+    </div>
+
+    <!-- Register form -->
+    <div id="register-form" style="display:none">
+      <p style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.5">Register an account to request admin access. Your request will be reviewed before access is granted.</p>
+      <div class="form-group"><label>Full Name</label><input type="text" id="reg-name" placeholder="Your name"></div>
+      <div class="form-group"><label>Email</label><input type="email" id="reg-email" placeholder="you@example.com"></div>
+      <div class="form-group"><label>Password</label><input type="password" id="reg-pass" placeholder="At least 6 characters"></div>
+      <button class="btn-full" onclick="doRegister()">Request Access →</button>
+    </div>
+  </div>
+</div>
+
+<!-- PENDING SCREEN -->
+<div id="pending-screen" style="display:none">
+  <div class="info-screen">
+    <div class="info-box">
+      <div class="info-icon">⏳</div>
+      <div class="info-title">Access Pending</div>
+      <div class="info-desc">Your request for admin access has been submitted and is awaiting review. You'll be able to log in once it's been approved.</div>
+      <button class="btn-full" onclick="doSignOut()" style="max-width:200px;margin:0 auto">Sign Out</button>
+    </div>
+  </div>
+</div>
+
+<!-- REJECTED SCREEN -->
+<div id="rejected-screen" style="display:none">
+  <div class="info-screen">
+    <div class="info-box">
+      <div class="info-icon">❌</div>
+      <div class="info-title">Access Not Granted</div>
+      <div class="info-desc">Your request for admin access was not approved. If you believe this is an error, please contact the platform owner directly.</div>
+      <button class="btn-full" onclick="doSignOut()" style="max-width:200px;margin:0 auto">Sign Out</button>
+    </div>
+  </div>
+</div>
+
+<!-- NOT ADMIN SCREEN -->
+<div id="not-admin-screen" style="display:none">
+  <div class="info-screen">
+    <div class="info-box">
+      <div class="info-icon">🔒</div>
+      <div class="info-title">No Admin Access</div>
+      <div class="info-desc">This account doesn't have admin privileges. If you're a competition organiser, use the main WeighBet app instead.</div>
+      <button class="btn-full" onclick="doSignOut()" style="max-width:200px;margin:0 auto">Sign Out</button>
+    </div>
+  </div>
+</div>
+
+<!-- APP SCREEN -->
+<div id="app-screen" style="display:none">
+
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-logo">
+      ⚖️ WeighBet
+      <span class="header-logo-accent">ADMIN</span>
+    </div>
+    <div class="header-user">
+      <div id="header-name"></div>
+      <div class="header-avatar" id="header-avatar">?</div>
+    </div>
+  </header>
+
+  <div class="app-body">
+
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <div class="nav-section">Platform</div>
+      <button class="nav-item active" data-tab="dashboard" onclick="switchTab('dashboard')">📊 Dashboard</button>
+      <button class="nav-item" data-tab="competitions" onclick="switchTab('competitions')">🏆 Competitions</button>
+      <button class="nav-item" data-tab="users" onclick="switchTab('users')">👥 Users</button>
+      <button class="nav-item" data-tab="bugs" onclick="switchTab('bugs')">🐛 Bug Reports</button>
+
+      <div class="nav-section" style="margin-top:16px">Admin</div>
+      <button class="nav-item" data-tab="access" onclick="switchTab('access')">
+        🔐 Access Requests
+        <span class="nav-badge" id="access-badge">0</span>
+      </button>
+      <button class="nav-item" data-tab="settings" onclick="switchTab('settings')">⚙️ Settings</button>
+    </nav>
+
+    <!-- Main -->
+    <main class="main-content">
+
+      <!-- Dashboard -->
+      <div class="tab-panel" data-tab="dashboard" style="display:block">
+        <div class="page-title">Dashboard</div>
+        <div class="page-sub">Platform overview</div>
+        <div id="dashboard-content"><div class="loading">Loading...</div></div>
+      </div>
+
+      <!-- Competitions -->
+      <div class="tab-panel" data-tab="competitions">
+        <div class="page-title">Competitions</div>
+        <div class="page-sub">All competitions across the platform</div>
+        <div id="competitions-content"><div class="loading">Loading...</div></div>
+      </div>
+
+      <!-- Users -->
+      <div class="tab-panel" data-tab="users">
+        <div class="page-title">Users</div>
+        <div class="page-sub">All registered users</div>
+        <div id="users-content"><div class="loading">Loading...</div></div>
+      </div>
+
+      <!-- Bug Reports -->
+      <div class="tab-panel" data-tab="bugs">
+        <div class="page-title">Bug Reports</div>
+        <div class="page-sub">User-submitted reports from the app</div>
+        <div id="bugs-content"><div class="loading">Loading...</div></div>
+      </div>
+
+      <!-- Access Requests -->
+      <div class="tab-panel" data-tab="access">
+        <div class="page-title">Access Requests</div>
+        <div class="page-sub">Manage admin access and permissions</div>
+        <div id="access-content"><div class="loading">Loading...</div></div>
+      </div>
+
+      <!-- Settings -->
+      <div class="tab-panel" data-tab="settings">
+        <div class="page-title">Settings</div>
+        <div class="page-sub">Your account and preferences</div>
+        <div id="settings-content"></div>
+      </div>
+
+    </main>
+  </div>
+</div>
+
+<!-- Competition detail modal -->
+<div class="modal-overlay" id="comp-modal" onclick="if(event.target===this)closeModal('comp-modal')">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeModal('comp-modal')">×</button>
+    <div id="comp-modal-body"></div>
+  </div>
+</div>
+
+<!-- User detail modal -->
+<div class="modal-overlay" id="user-modal" onclick="if(event.target===this)closeModal('user-modal')">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeModal('user-modal')">×</button>
+    <div id="user-modal-body"></div>
+  </div>
+</div>
+
+</body>
+</html>
