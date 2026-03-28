@@ -185,7 +185,7 @@ function renderComps(filter) {
           <button class="btn-sm btn-primary" data-cid="${c.id}" onclick="viewCompDetail(this.dataset.cid)">🔍 View</button>
           <button class="btn-sm btn-warning" data-cid="${c.id}" onclick="openWeighInEditor(this.dataset.cid)">⚖️ Weigh-ins</button>
           <button class="btn-sm btn-success" data-cid="${c.id}" onclick="recalcComp(this.dataset.cid,this)">🔄 Recalc</button>
-          <button class="btn-sm btn-muted" data-code="${c.inviteCode||''}" onclick="window.open('https://timmilatte.github.io/weighbet/?join='+this.dataset.code,'_blank')">👁 Open App</button>
+          <button class="btn-sm btn-primary" data-cid="${c.id}" onclick="openViewAsSelect(this.dataset.cid)">👁 View as...</button>
           ${!c.suspended&&!c.archived?`<button class="btn-sm btn-danger" data-cid="${c.id}" onclick="suspendComp(this.dataset.cid,true)">🚫 Suspend</button>`:''}
           ${c.suspended?`<button class="btn-sm btn-success" data-cid="${c.id}" onclick="suspendComp(this.dataset.cid,false)">✅ Unsuspend</button>`:''}
           ${!c.archived?`<button class="btn-sm btn-muted" data-cid="${c.id}" onclick="archiveComp(this.dataset.cid)">📦 Archive</button>`:''}
@@ -258,7 +258,7 @@ window.viewCompDetail = async function(compId) {
       <h2 style="font-family:Syne,sans-serif;font-weight:800;font-size:22px;margin-bottom:4px">${comp.name}</h2>
       <p style="color:var(--muted);margin-bottom:20px">Start: ${comp.startDate||'not set'} · ${comp.weeks||8} weeks · ${comp.buyin?'$'+comp.buyin+' buy-in':'free'} · Code: <code>${comp.inviteCode||'-'}</code></p>
       <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
-        <button class="btn-sm btn-muted" data-code="${comp.inviteCode||''}" onclick="window.open('https://timmilatte.github.io/weighbet/?join='+this.dataset.code,'_blank')">🔗 Open in User App</button>
+        <button class="btn-sm btn-primary" data-cid="${compId}" onclick="openViewAsSelect(this.dataset.cid)">👁 View as User...</button>
         <button class="btn-sm btn-success" data-cid="${compId}" onclick="recalcComp(this.dataset.cid,this)">🔄 Recalc All Stats</button>
         ${!comp.suspended?`<button class="btn-sm btn-danger" data-cid="${compId}" onclick="suspendComp(this.dataset.cid,true);closeModal('comp-modal')">🚫 Suspend</button>`:`<button class="btn-sm btn-success" data-cid="${compId}" onclick="suspendComp(this.dataset.cid,false);closeModal('comp-modal')">✅ Unsuspend</button>`}
       </div>
@@ -282,7 +282,7 @@ window.viewCompDetail = async function(compId) {
           <td>${m.totalPct!=null?m.totalPct.toFixed(2)+'%':'-'}</td>
           <td><div style="display:flex;gap:4px;flex-wrap:wrap">
             <button class="btn-sm btn-warning" data-cid="${compId}" data-uid="${m.uid}" onclick="openWeighInEditorUser(this.dataset.cid,this.dataset.uid)">⚖️ Weigh-ins</button>
-            <button class="btn-sm btn-primary" data-code="${comp.inviteCode||''}" data-uid="${m.uid}" data-name="${encodeURIComponent(m.displayName||'')}" onclick="openAppAsUser(this.dataset.code,this.dataset.uid,decodeURIComponent(this.dataset.name))">👁 View as</button>
+            <button class="btn-sm btn-primary" data-cid="${compId}" data-uid="${m.uid}" data-name="${encodeURIComponent(m.displayName||'')}" onclick="openViewAs(this.dataset.cid,this.dataset.uid,decodeURIComponent(this.dataset.name))">👁 View as</button>
             <button class="btn-sm btn-${m.playerType==='free'?'success':'muted'}" data-cid="${compId}" data-uid="${m.uid}" data-type="${m.playerType||'paying'}" onclick="togglePlayerType(this.dataset.cid,this.dataset.uid,this.dataset.type)">
               ${m.playerType==='free'?'→ Paying':'→ Free'}
             </button>
@@ -959,31 +959,224 @@ window.closeModal = function(id) { const el=$(id); if(el) el.style.display='none
 // Open the user app as a specific competitor.
 // Copies a deep-link to clipboard and offers to open it.
 // The admin must be logged into the user app with their SA account to use ghost mode.
-window.openAppAsUser = function(inviteCode, uid, displayName) {
-  const baseUrl = 'https://timmilatte.github.io/weighbet/';
-  const link = baseUrl + '?join=' + inviteCode + '&viewAs=' + uid;
-  // Show a small prompt with instructions
-  const existing = document.getElementById('view-as-toast');
-  if(existing) existing.remove();
-  const toast = document.createElement('div');
-  toast.id = 'view-as-toast';
-  toast.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1e1e2c;border:1px solid rgba(232,168,56,0.3);border-radius:14px;padding:18px 22px;z-index:300;max-width:440px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.5)';
-  toast.innerHTML = `
-    <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:15px;margin-bottom:6px">👁 View as ${displayName}</div>
-    <p style="font-size:12px;color:#9090a0;margin-bottom:14px;line-height:1.6">
-      Open the user app and sign in with your <strong style="color:#e8a838">Super Admin account</strong>.
-      Then use the ghost mode <em>"View as..."</em> button on the competition to select this user.<br><br>
-      Or use this direct link — paste it in your browser while signed in as SA:
-    </p>
-    <div style="display:flex;gap:8px;align-items:center;background:#0d0d12;border-radius:8px;padding:8px 12px;margin-bottom:12px;overflow:hidden">
-      <code style="font-size:11px;color:#e8a838;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${link}</code>
-    </div>
-    <div style="display:flex;gap:8px">
-      <button onclick="navigator.clipboard.writeText('${link}').then(()=>showAlert('Link copied!'))" style="flex:1;padding:8px;background:rgba(232,168,56,0.15);border:none;border-radius:8px;color:#e8a838;cursor:pointer;font-size:13px;font-family:'DM Sans',sans-serif">📋 Copy Link</button>
-      <button onclick="window.open('${link}','_blank')" style="flex:1;padding:8px;background:rgba(95,212,179,0.12);border:none;border-radius:8px;color:#5fd4b3;cursor:pointer;font-size:13px;font-family:'DM Sans',sans-serif">🔗 Open App</button>
-      <button onclick="this.closest('#view-as-toast').remove()" style="padding:8px 12px;background:rgba(255,255,255,0.05);border:none;border-radius:8px;color:#666;cursor:pointer;font-size:13px;font-family:'DM Sans',sans-serif">✕</button>
-    </div>`;
-  document.body.appendChild(toast);
+// ── VIEW AS USER — self-contained competition viewer ─────────────────────────
+// Loads all competition data and renders a read-only preview of what a specific
+// user sees: leaderboard, their H2H matchup history, prizes, and their stats.
+// Everything runs inside the admin panel — no user app involved.
+
+// State for the viewer
+let vaComp = null, vaMembers = [], vaWeighIns = [], vaMatchups = [];
+
+// Open a member-picker for a competition, then view as that member
+window.openViewAsSelect = async function(compId) {
+  const modal = $('viewas-modal'), body = $('viewas-body');
+  if(!modal || !body) return;
+  body.innerHTML = '<div class="loading">Loading members...</div>';
+  modal.style.display = 'flex';
+  try {
+    const [cs, ms] = await Promise.all([
+      getDoc(doc(db,'competitions',compId)),
+      getDocs(collection(db,'competitions',compId,'members'))
+    ]);
+    vaComp = {id:compId, ...cs.data()};
+    vaMembers = ms.docs.map(d=>({uid:d.id,...d.data()})).sort((a,b)=>(a.displayName||'').localeCompare(b.displayName||''));
+    body.innerHTML = `
+      <h2 style="font-family:Syne,sans-serif;font-weight:800;font-size:20px;margin-bottom:4px">👁 View as User</h2>
+      <p style="color:var(--muted);margin-bottom:20px">${vaComp.name} — select a competitor to preview their view</p>
+      <div style="display:grid;gap:6px">
+        ${vaMembers.map(m=>`
+          <button onclick="loadViewAs('${compId}','${m.uid}')"
+            style="display:flex;align-items:center;gap:12px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:12px 16px;cursor:pointer;text-align:left;transition:border-color .15s"
+            onmouseover="this.style.borderColor='rgba(232,168,56,0.4)'" onmouseout="this.style.borderColor='var(--border)'">
+            <div style="width:36px;height:36px;border-radius:50%;background:rgba(232,168,56,0.15);color:var(--accent);display:flex;align-items:center;justify-content:center;font-family:Syne,sans-serif;font-weight:800;font-size:14px;flex-shrink:0">${(m.displayName||'?')[0].toUpperCase()}</div>
+            <div style="flex:1">
+              <div style="font-weight:600;font-size:14px;color:var(--text)">${m.displayName||'Unknown'}</div>
+              <div style="font-size:12px;color:var(--muted)">${m.playerType==='free'?'Free player':'Paying'} · ${m.role||'competitor'} · ${m.weighInCount||0} weigh-ins</div>
+            </div>
+            <span style="color:var(--muted);font-size:18px">→</span>
+          </button>`).join('')}
+      </div>`;
+  } catch(e) { body.innerHTML=`<div class="error-msg">${e.message}</div>`; }
+};
+
+// Open view-as directly for a known uid
+window.openViewAs = async function(compId, uid, displayName) {
+  const modal = $('viewas-modal'), body = $('viewas-body');
+  if(!modal || !body) return;
+  body.innerHTML = '<div class="loading">Loading...</div>';
+  modal.style.display = 'flex';
+  await loadViewAs(compId, uid);
+};
+
+window.loadViewAs = async function(compId, uid) {
+  const body = $('viewas-body'); if(!body) return;
+  body.innerHTML = '<div class="loading">Loading competition data...</div>';
+  try {
+    const [cs, ms, ws, mts] = await Promise.all([
+      getDoc(doc(db,'competitions',compId)),
+      getDocs(collection(db,'competitions',compId,'members')),
+      getDocs(collection(db,'competitions',compId,'weighins')),
+      getDocs(collection(db,'competitions',compId,'matchups'))
+    ]);
+    vaComp     = {id:compId, ...cs.data()};
+    vaMembers  = ms.docs.map(d=>({uid:d.id,...d.data()}));
+    vaWeighIns = ws.docs.map(d=>({id:d.id,...d.data()}));
+    vaMatchups = mts.docs.map(d=>({id:d.id,...d.data()}));
+    const me = vaMembers.find(m=>m.uid===uid) || {uid, displayName:'Unknown'};
+
+    // ── helpers scoped to this competition data ──
+    function ymd(d){ return d.toISOString().slice(0,10); }
+    function weekStart(w){ if(!vaComp.startDate) return null; const s=new Date(vaComp.startDate+'T00:00:00'); s.setDate(s.getDate()+(w-1)*7); return s; }
+    function weekEnd(w){ const s=weekStart(w); if(!s) return null; const e=new Date(s); e.setDate(e.getDate()+6); return e; }
+    function userWI(u){ return vaWeighIns.filter(w=>w.userId===u).sort((a,b)=>a.date.localeCompare(b.date)); }
+    function lastWIForWeek(u,w){ const ws=weekStart(w),we=weekEnd(w); if(!ws) return null; const wsS=ymd(ws),weS=ymd(we); const es=userWI(u).filter(e=>e.date>=wsS&&e.date<=weS); return es.length?es[es.length-1]:null; }
+    function didWI(u,w){ return lastWIForWeek(u,w)!==null; }
+    function weeklyPct(u,w){ const end=lastWIForWeek(u,w); if(!end) return null; let prev=null; for(let pw=w-1;pw>=1;pw--){ const p=lastWIForWeek(u,pw); if(p){prev=p.weight;break;} } if(prev===null){ const sw=userWI(u); prev=sw.length?sw[0].weight:end.weight; } return prev===0?0:((prev-end.weight)/prev)*100; }
+    function totalPct(u){ const wi=userWI(u); if(wi.length<2) return null; return ((wi[0].weight-wi[wi.length-1].weight)/wi[0].weight)*100; }
+    function isPaying(u){ const m=vaMembers.find(x=>x.uid===u); return m?.playerType!=='free'; }
+    function nameOf(u){ const m=vaMembers.find(x=>x.uid===u); return m?.displayName||'Unknown'; }
+    function getCurrentWeek(){ if(!vaComp.startDate) return 1; const start=new Date(vaComp.startDate+'T00:00:00'),now=new Date(); const diff=Math.floor((now-start)/(7*24*60*60*1000))+1; return Math.max(1,Math.min(diff,vaComp.weeks||8)); }
+    function fmtPct(v){ return v==null?'-':v.toFixed(2)+'%'; }
+    function fmtMoney(v){ return v==null?'-':'$'+v.toFixed(2); }
+
+    const paying = vaMembers.filter(m=>m.playerType!=='free');
+    const wpp    = Math.max(1,Math.floor(paying.length/2));
+    const pool   = paying.length*(vaComp.buyin||0);
+    const weeks  = vaComp.weeks||8;
+    const basePerWin = wpp>0?(pool*0.35/weeks)/wpp:(pool*0.35/weeks);
+    const wBL    = pool*0.05/weeks;
+    const curWk  = getCurrentWeek();
+
+    // ── prize helper — same iterative algorithm as user app ──
+    function getPrizeForWeek(w) {
+      if(w===weeks) return basePerWin;
+      let pot=0;
+      for(let pw=1;pw<w;pw++){
+        const weeksLeft=weeks-pw;
+        const extra=weeksLeft>0?(pot/weeksLeft)/wpp:0;
+        const prize=basePerWin+extra;
+        if(weeksLeft>0) pot-=pot/weeksLeft;
+        vaMatchups.filter(m=>m.week===pw).forEach(m=>{
+          const p1f=!isPaying(m.p1),p2f=m.p2!=='BYE'&&!isPaying(m.p2);
+          if(p1f&&p2f) return;
+          if(m.p2==='BYE'){ if(!didWI(m.p1,pw)) pot+=prize; else{ const others=paying.filter(c=>c.uid!==m.p1).map(c=>weeklyPct(c.uid,pw)).filter(v=>v!==null).sort((a,b)=>a-b); const med=others.length?others[Math.floor(others.length/2)]:null; if(med!==null&&weeklyPct(m.p1,pw)<=med) pot+=prize; } return; }
+          if(p1f!==p2f){ const fu=p1f?m.p1:m.p2,pu=p1f?m.p2:m.p1; if(!didWI(fu,pw)&&!didWI(pu,pw)){pot+=prize;return;} if(!didWI(pu,pw)) return; const fp=weeklyPct(fu,pw),pp=weeklyPct(pu,pw); if(fp!==null&&pp!==null&&fp>=pp) pot+=prize; return; }
+          if(!didWI(m.p1,pw)&&!didWI(m.p2,pw)) pot+=prize;
+        });
+      }
+      const wLeft=weeks-w;
+      return basePerWin+(pot/(wLeft+1))/wpp;
+    }
+
+    // ── leaderboard ──
+    const lbData = vaMembers.map(m=>({
+      uid:m.uid, name:m.displayName||'?', pct:totalPct(m.uid), wi:userWI(m.uid).length, paying:isPaying(m.uid), isMe:m.uid===uid
+    })).filter(m=>m.wi>0).sort((a,b)=>(b.pct||0)-(a.pct||0));
+
+    // ── my H2H history ──
+    const myMatchups = vaMatchups.filter(m=>m.p1===uid||m.p2===uid).sort((a,b)=>a.week-b.week);
+
+    // ── build H2H result rows ──
+    function h2hRow(m) {
+      const w=m.week, prize=getPrizeForWeek(w);
+      const opp=m.p1===uid?(m.p2==='BYE'?'BYE':m.p2):(m.p1);
+      const oppName=opp==='BYE'?'BYE (vs median)':nameOf(opp);
+      const myPct=weeklyPct(uid,w), oppPct=opp==='BYE'?null:weeklyPct(opp,w);
+      let result='⏳ Pending', resultColor='var(--muted)', prizeWon=0;
+      if(w<curWk||w===curWk){
+        if(opp==='BYE'){
+          if(!didWI(uid,w)){result='❌ No weigh-in';resultColor='var(--danger)';}
+          else{ const others=paying.filter(c=>c.uid!==uid).map(c=>weeklyPct(c.uid,w)).filter(v=>v!==null).sort((a,b)=>a-b); const med=others.length?others[Math.floor(others.length/2)]:null; if(med!==null&&myPct>med){result='✅ Won';resultColor='var(--success)';prizeWon=prize;} else {result='❌ Lost (vs median)';resultColor='var(--danger)';} }
+        } else if(!isPaying(uid)&&isPaying(opp)){
+          if(!didWI(uid,w)){result='No weigh-in';} else if(!didWI(opp,w)){result='✅ Won (opponent no-show)';resultColor='var(--success)';prizeWon=0;} else if(myPct!==null&&oppPct!==null){ result=myPct>oppPct?'✅ Won (bragging rights)':'❌ Lost'; resultColor=myPct>oppPct?'var(--success)':'var(--danger)'; }
+        } else if(isPaying(uid)&&!isPaying(opp)){
+          if(!didWI(uid,w)){result='❌ No weigh-in';resultColor='var(--danger)';} else if(!didWI(opp,w)){result='✅ Won (opponent no-show)';resultColor='var(--success)';prizeWon=prize;} else if(myPct!==null&&oppPct!==null){ if(myPct>=oppPct){result='✅ Won';resultColor='var(--success)';prizeWon=prize;} else {result='❌ Lost';resultColor='var(--danger)';} }
+        } else {
+          if(!didWI(uid,w)&&!didWI(opp,w)){result='Both no-show';} else if(!didWI(uid,w)){result='❌ No weigh-in — lost by default';resultColor='var(--danger)';} else if(!didWI(opp,w)){result='✅ Won by default';resultColor='var(--success)';prizeWon=prize;} else if(myPct!==null&&oppPct!==null){ if(myPct===oppPct){result='🤝 Tie — split';resultColor='var(--warning)';prizeWon=prize/2;} else if(myPct>oppPct){result='✅ Won';resultColor='var(--success)';prizeWon=prize;} else {result='❌ Lost';resultColor='var(--danger)';} }
+        }
+      }
+      return `<tr>
+        <td style="font-weight:600">W${w}</td>
+        <td>${oppName} ${!isPaying(opp)&&opp!=='BYE'?'<span class="badge badge-muted" style="font-size:10px">Free</span>':''}</td>
+        <td>${fmtPct(myPct)}</td>
+        <td>${opp==='BYE'?'-':fmtPct(oppPct)}</td>
+        <td style="color:${resultColor};font-weight:500">${result}</td>
+        <td style="font-weight:600;color:var(--success)">${prizeWon>0?fmtMoney(prizeWon):''}</td>
+      </tr>`;
+    }
+
+    // ── confirmed earnings ──
+    let totalEarned=0;
+    for(let w=1;w<curWk;w++){
+      const prize=w===weeks?basePerWin:getPrizeForWeek(w); // final week base only
+      vaMatchups.filter(m=>m.week===w&&(m.p1===uid||m.p2===uid)).forEach(m=>{
+        const opp=m.p1===uid?m.p2:m.p1;
+        if(isPaying(uid)){
+          if(opp==='BYE'){ const others=paying.filter(c=>c.uid!==uid).map(c=>weeklyPct(c.uid,w)).filter(v=>v!==null).sort((a,b)=>a-b); const med=others.length?others[Math.floor(others.length/2)]:null; if(didWI(uid,w)&&med!==null&&weeklyPct(uid,w)>med) totalEarned+=prize; }
+          else if(!isPaying(opp)){ if(didWI(uid,w)&&(!didWI(opp,w)||weeklyPct(uid,w)>=weeklyPct(opp,w))) totalEarned+=prize; }
+          else { const myP=weeklyPct(uid,w),opP=weeklyPct(opp,w); if(!didWI(uid,w)) return; if(!didWI(opp,w)){totalEarned+=prize;} else if(myP!==null&&opP!==null){ if(myP===opP) totalEarned+=prize/2; else if(myP>opP) totalEarned+=prize; } }
+        }
+      });
+      // BL bonus
+      const bests=paying.map(c=>({uid:c.uid,pct:weeklyPct(c.uid,w)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct);
+      if(bests.length>0&&bests[0].uid===uid) totalEarned+=wBL;
+    }
+
+    // ── weekly pct log ──
+    const myWI = userWI(uid);
+
+    body.innerHTML = `
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
+        <button onclick="openViewAsSelect('${compId}')" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:13px;padding:0">← Back</button>
+        <div style="width:1px;height:16px;background:var(--border)"></div>
+        <h2 style="font-family:Syne,sans-serif;font-weight:800;font-size:20px">👁 ${me.displayName||'Unknown'}</h2>
+        <span class="badge ${me.playerType==='free'?'badge-muted':'badge-success'}">${me.playerType==='free'?'Free':'Paying'}</span>
+      </div>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:24px">${vaComp.name} · Week ${curWk} of ${weeks} · Pool: ${fmtMoney(pool)}</p>
+
+      <div class="stat-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:24px">
+        <div class="stat-card"><div class="stat-value">${fmtPct(totalPct(uid))}</div><div class="stat-label">Total Lost</div></div>
+        <div class="stat-card"><div class="stat-value">${myWI.length}</div><div class="stat-label">Weigh-ins</div></div>
+        <div class="stat-card"><div class="stat-value" style="color:var(--success)">${fmtMoney(totalEarned)}</div><div class="stat-label">Confirmed Earnings</div></div>
+        <div class="stat-card"><div class="stat-value">${myMatchups.length}</div><div class="stat-label">H2H Matches</div></div>
+      </div>
+
+      <div class="section-title">🏆 Leaderboard (their view)</div>
+      <div class="table-wrap" style="margin-bottom:24px"><table>
+        <thead><tr><th>#</th><th>Name</th><th>Type</th><th>Total Lost</th><th>Weigh-ins</th></tr></thead>
+        <tbody>${lbData.map((m,i)=>`<tr style="${m.isMe?'background:rgba(232,168,56,0.06)':''}">
+          <td style="font-weight:700;color:${i===0?'#f7d76a':i===1?'#c0c0c0':i===2?'#cd7f32':'var(--muted)'}">${i+1}</td>
+          <td><strong>${m.name}</strong>${m.isMe?' <span class="badge badge-admin" style="font-size:10px">you</span>':''}</td>
+          <td>${m.paying?'<span class="badge badge-success">Paying</span>':'<span class="badge badge-muted">Free</span>'}</td>
+          <td style="font-weight:600;color:var(--success)">${fmtPct(m.pct)}</td>
+          <td style="color:var(--muted)">${m.wi}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+
+      <div class="section-title">⚔️ H2H Match History</div>
+      ${myMatchups.length===0?'<p style="color:var(--muted);font-size:13px;margin-bottom:24px">No matchups scheduled yet.</p>':`
+      <div class="table-wrap" style="margin-bottom:24px"><table>
+        <thead><tr><th>Week</th><th>Opponent</th><th>My %</th><th>Opp %</th><th>Result</th><th>Won</th></tr></thead>
+        <tbody>${myMatchups.map(m=>h2hRow(m)).join('')}</tbody>
+      </table></div>`}
+
+      <div class="section-title">📊 Weekly Weigh-in Log</div>
+      <div class="table-wrap" style="margin-bottom:24px"><table>
+        <thead><tr><th>Date</th><th>Week</th><th>Weight</th><th>Weekly % Lost</th></tr></thead>
+        <tbody>${myWI.length===0?'<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:20px">No weigh-ins logged</td></tr>':myWI.map(w=>{
+          const wk=w.week||(vaComp.startDate?Math.floor((new Date(w.date+'T00:00:00')-new Date(vaComp.startDate+'T00:00:00'))/(7*24*60*60*1000))+1:null);
+          return `<tr><td>${w.date}</td><td>${wk?'W'+wk:'-'}</td><td style="font-weight:600">${w.weight} ${w.unit||'kg'}</td><td style="color:var(--success)">${wk?fmtPct(weeklyPct(uid,wk)):'-'}</td></tr>`;
+        }).join('')}</tbody>
+      </table></div>
+
+      <div class="section-title">💰 Prize Breakdown</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:8px">
+        <div class="card-section" style="text-align:center"><div style="font-size:12px;color:var(--muted);margin-bottom:4px">Base H2H per win</div><div style="font-family:Syne,sans-serif;font-weight:700;font-size:18px">${fmtMoney(basePerWin)}</div></div>
+        <div class="card-section" style="text-align:center"><div style="font-size:12px;color:var(--muted);margin-bottom:4px">Weekly BL bonus</div><div style="font-family:Syne,sans-serif;font-weight:700;font-size:18px">${fmtMoney(wBL)}</div></div>
+        <div class="card-section" style="text-align:center"><div style="font-size:12px;color:var(--muted);margin-bottom:4px">This week's H2H prize</div><div style="font-family:Syne,sans-serif;font-weight:700;font-size:18px;color:var(--success)">${fmtMoney(getPrizeForWeek(curWk))}</div></div>
+      </div>
+      <p style="font-size:12px;color:var(--muted)">Paying: ${paying.length} · Winners/week: ${wpp} · Total H2H budget: ${fmtMoney(pool*0.35)} · 1st BL: ${fmtMoney(pool*0.45)} · 2nd BL: ${fmtMoney(pool*0.15)}</p>`;
+  } catch(e) { $('viewas-body').innerHTML=`<div class="error-msg">${e.message}</div>`; }
 };
 
 </script>
@@ -1230,6 +1423,11 @@ code{font-family:'DM Mono',monospace;font-size:12px;background:var(--bg3);paddin
 <!-- USER DETAIL MODAL -->
 <div class="modal-overlay" id="user-modal" onclick="if(event.target===this)closeModal('user-modal')">
   <div class="modal-box"><button class="modal-close" onclick="closeModal('user-modal')">×</button><div id="user-modal-body"></div></div>
+</div>
+
+<!-- VIEW AS USER MODAL -->
+<div class="modal-overlay" id="viewas-modal" onclick="if(event.target===this)closeModal('viewas-modal')">
+  <div class="modal-box" style="max-width:900px"><button class="modal-close" onclick="closeModal('viewas-modal')">×</button><div id="viewas-body"></div></div>
 </div>
 
 </body>
