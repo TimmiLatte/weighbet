@@ -261,51 +261,61 @@ function getWeeklyH2HPrize(w) {
   var basePrizePerWeek = pool * 0.35 / weeks;
   var basePerWin = winnersPerWk > 0 ? basePrizePerWeek / winnersPerWk : basePrizePerWeek;
 
-  // Sum up all unclaimed H2H money from weeks 1 to w-1
-  var unclaimed = 0;
-  for(var pw = 1; pw < w; pw++) {
+  // Compute prizes iteratively from week 1 up to week w.
+  // At each past week, track what was actually unclaimed (using that week's real prize),
+  // then spread the running unclaimed pot evenly across all remaining weeks.
+  // This ensures total payouts never exceed the 35% H2H budget.
+  var unclaimedPot = 0;
+
+  for (var pw = 1; pw < w; pw++) {
+    var weeksLeft = weeks - pw; // weeks after this one
+    // Extra per win this week from the pot (spread equally across remaining weeks)
+    var extraPerWin = weeksLeft > 0 ? (unclaimedPot / weeksLeft) / winnersPerWk : 0;
+    var prizeThisWeek = basePerWin + extraPerWin;
+
+    // Remove from pot what we distributed this week
+    if (weeksLeft > 0) unclaimedPot -= unclaimedPot / weeksLeft;
+
+    // Add back what went unclaimed this week (at the actual prize rate)
     var weekMatchups = matchups.filter(function(m){ return m.week === pw; });
     weekMatchups.forEach(function(m) {
-      // Skip free vs free - no money at stake
       var p1f = isFreePlayer(m.p1);
       var p2f = m.p2 !== 'BYE' && isFreePlayer(m.p2);
-      if(p1f && p2f) return;
+      if(p1f && p2f) return; // free vs free — no money at stake
+
       if(m.p2 === 'BYE') {
-        // BYE match - unclaimed if no weigh-in or failed median
         var p1pct = weeklyPctLost(m.p1, pw);
-        if(p1pct === null) { unclaimed += basePerWin; return; }
+        if(p1pct === null) { unclaimedPot += prizeThisWeek; return; }
         var others = paying.filter(function(c){ return c.uid!==m.p1; })
           .map(function(c){ return weeklyPctLost(c.uid,pw); })
           .filter(function(v){ return v!==null; }).sort(function(a,b){ return a-b; });
         var median = others.length ? others[Math.floor(others.length/2)] : null;
-        if(median !== null && p1pct <= median) unclaimed += basePerWin;
+        if(median !== null && p1pct <= median) unclaimedPot += prizeThisWeek;
         return;
       }
-      // Wildcard - unclaimed if both no-show or free player wins
       if(p1f !== p2f) {
+        // Wildcard: unclaimed if both no-show, or free player wins
         var freeUid2 = p1f ? m.p1 : m.p2;
         var payUid2  = p1f ? m.p2 : m.p1;
         var fIn = didWeighIn(freeUid2, pw), pIn = didWeighIn(payUid2, pw);
-        if(!fIn && !pIn) { unclaimed += basePerWin; return; }
-        if(!pIn) return; // paying no-show, free wins = no prize anyway
+        if(!fIn && !pIn) { unclaimedPot += prizeThisWeek; return; }
+        if(!pIn) return;
         var fPct = weeklyPctLost(freeUid2, pw), pPct = weeklyPctLost(payUid2, pw);
-        if(fIn && fPct !== null && pPct !== null && fPct >= pPct) unclaimed += basePerWin;
+        if(fIn && fPct !== null && pPct !== null && fPct >= pPct) unclaimedPot += prizeThisWeek;
         return;
       }
-      // Standard paying vs paying - unclaimed only if BOTH no-show
+      // Standard paying vs paying: unclaimed only if BOTH no-show
       var p1in = didWeighIn(m.p1, pw), p2in = didWeighIn(m.p2, pw);
-      if(!p1in && !p2in) unclaimed += basePerWin;
+      if(!p1in && !p2in) unclaimedPot += prizeThisWeek;
     });
   }
 
-  // Remaining weeks including current (exclude final week which rolls to BL)
-  var weeksRemaining = weeks - w + 1;
-  if(weeksRemaining <= 0) weeksRemaining = 1;
-
-  // Redistribute unclaimed across remaining weeks
-  // (if current week is final, unclaimed goes to BL not here)
-  var redistributed = w < weeks ? unclaimed / weeksRemaining : 0;
-  return basePerWin + redistributed;
+  // Prize for week w: base + equal share of remaining pot spread across remaining weeks
+  var weeksLeftNow = weeks - w; // weeks after w
+  var extraForW = weeksLeftNow >= 0 ? (unclaimedPot / (weeksLeftNow + 1)) / winnersPerWk : 0;
+  // Final week: unclaimed rolls to BL prizes, not H2H
+  if (w === weeks) extraForW = 0;
+  return basePerWin + extraForW;
 }
 
 function h2hResult(m, w) {
@@ -1869,13 +1879,10 @@ function renderPrizes(){
 
   var earnMap={};
   var _wpp = Math.max(1, Math.floor(paying.length/2));
-  var _basePrizePerWin = _wpp > 0 ? (pool*0.35/weeks)/_wpp : 0;
   for(var w=1;w<=curWk;w++){
     getAllH2HResults(w).forEach(r=>{
-      // Use base prize per win only — never the redistributed amount.
-      // r.prize may include redistribution from unclaimed weeks which inflates earnings.
       if(r.winner && r.prize > 0) {
-        earnMap[r.winner]=(earnMap[r.winner]||0)+_basePrizePerWin;
+        earnMap[r.winner]=(earnMap[r.winner]||0)+r.prize;
       }
     });
     var wkBests=payingCompetitors().map(c=>({uid:c.uid,pct:weeklyPctLost(c.uid,w)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct);
@@ -2372,12 +2379,11 @@ function renderProgressPage(){
   var _earnUid = viewingUid();
   var _payingCount = payingCompetitors().length;
   var _wpp2 = Math.max(1, Math.floor(_payingCount/2));
-  var _basePrizePerWin2 = _wpp2 > 0 ? (pool*0.35/wksT)/_wpp2 : 0;
   var allEarnMap = {};
   for(var ew=1;ew<=curWeek;ew++){
     getAllH2HResults(ew).forEach(function(r){
       if(r.winner && r.prize > 0){
-        allEarnMap[r.winner]=(allEarnMap[r.winner]||0)+_basePrizePerWin2;
+        allEarnMap[r.winner]=(allEarnMap[r.winner]||0)+r.prize;
       }
     });
     var wkBests=payingCompetitors().map(function(c){return{uid:c.uid,pct:weeklyPctLost(c.uid,ew)};}).filter(function(x){return x.pct!=null;}).sort(function(a,b){return b.pct-a.pct;});
