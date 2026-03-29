@@ -103,6 +103,9 @@ function renderHeader() {
 window.switchTab = async function(tab) {
   activeTab = tab;
   document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.tab===tab));
+  document.querySelectorAll('.mobile-nav-item[data-tab]').forEach(el => el.classList.toggle('active', el.dataset.tab===tab));
+  // Sync access badge to mobile copy
+  const b=$('access-badge'), bm=$('access-badge-m'); if(b&&bm){bm.textContent=b.textContent;bm.style.display=b.style.display;}
   document.querySelectorAll('.tab-panel').forEach(el => el.style.display = el.dataset.tab===tab ? 'block' : 'none');
   if(tab==='dashboard')    await renderDashboard();
   else if(tab==='competitions') await loadComps();
@@ -506,6 +509,7 @@ function renderUsers(filter) {
     <div class="toolbar">
       <input class="search-input" placeholder="Search by name or email..." oninput="renderUsers(this.value.toLowerCase())">
       <span class="toolbar-count">${list.length} users</span>
+      <button class="btn-sm btn-success" onclick="openCreateUser()">+ Create User</button>
     </div>
     <div class="table-wrap"><table>
       <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Joined</th><th>Actions</th></tr></thead>
@@ -518,7 +522,9 @@ function renderUsers(filter) {
           <td>${rb}</td><td style="color:var(--muted)">${ts}</td>
           <td><div style="display:flex;gap:4px;flex-wrap:wrap">
             <button class="btn-sm btn-primary" data-uid="${u.id}" onclick="viewUserDetail(this.dataset.uid)">🔍 View</button>
+            <button class="btn-sm btn-success" data-uid="${u.id}" onclick="openAddUserToComp(this.dataset.uid)">+ Add to Comp</button>
             ${isOwner&&u.role!=='owner'?`<button class="btn-sm btn-warning" data-uid="${u.id}" data-name="${encodeURIComponent(u.displayName||'')}" onclick="transferOwnership(this.dataset.uid,decodeURIComponent(this.dataset.name))">👑 Make Owner</button>`:''}
+            ${u.role!=='owner'?`<button class="btn-sm btn-danger" data-uid="${u.id}" data-name="${encodeURIComponent(u.displayName||u.email||'')}" onclick="deleteUser(this.dataset.uid,decodeURIComponent(this.dataset.name))">🗑️ Delete</button>`:''}
           </div></td>
         </tr>`;
       }).join('')}</tbody>
@@ -545,15 +551,18 @@ window.viewUserDetail = async function(uid) {
           <span class="badge ${u.role==='owner'?'badge-owner':u.role==='superAdmin'?'badge-admin':'badge-muted'}">${u.role||'user'}</span>
         </div>
       </div>
-      <div class="section-title">Competitions (${comps.length})</div>
-      ${comps.length===0?'<p style="color:var(--muted)">No competitions</p>':`
+      <div class="section-title">Competitions (${comps.length})
+        <button class="btn-sm btn-success" style="margin-left:auto" data-uid="${uid}" onclick="openAddUserToComp(this.dataset.uid)">+ Add to Competition</button>
+      </div>
+      ${comps.length===0?'<p style="color:var(--muted);margin-bottom:16px">Not in any competitions yet.</p>':`
         <div class="table-wrap"><table>
-          <thead><tr><th>Competition</th><th>Role</th><th>Type</th><th>Status</th></tr></thead>
+          <thead><tr><th>Competition</th><th>Role</th><th>Type</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>${comps.map(c=>`<tr>
             <td>${c.compName||'Unknown'}</td>
             <td>${c.role||'competitor'}</td>
             <td>${c.playerType==='free'?'<span class="badge badge-muted">Free</span>':'<span class="badge badge-success">Paying</span>'}</td>
-            <td>${c.archived?'Archived':'Active'}</td>
+            <td>${c.archived?'<span class="badge badge-muted">Archived</span>':'<span class="badge badge-success">Active</span>'}</td>
+            <td><button class="btn-sm btn-danger" data-cid="${c.compId}" data-uid="${uid}" data-name="${encodeURIComponent(u.displayName||'')}" onclick="removeMemberFromComp(this.dataset.cid,this.dataset.uid,decodeURIComponent(this.dataset.name));closeModal('user-modal')">× Remove</button></td>
           </tr>`).join('')}</tbody>
         </table></div>`}`;
   } catch(e) { body.innerHTML=`<div class="error-msg">${e.message}</div>`; }
@@ -569,6 +578,170 @@ window.transferOwnership = async function(uid, name) {
     alert('Ownership transferred. Signing you out.');
     await signOut(auth);
   } catch(e) { alert('Error: '+e.message); }
+};
+
+// ── CREATE USER ──────────────────────────────────────────────
+window.openCreateUser = function() {
+  const modal=$('user-modal'), body=$('user-modal-body');
+  if(!modal||!body) return;
+  modal.style.display='flex';
+  body.innerHTML=`
+    <h2 style="font-family:Syne,sans-serif;font-weight:800;font-size:20px;margin-bottom:4px">+ Create New User</h2>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:20px">Creates a Firebase Auth account and a Firestore user profile. The user will need to reset their password via the login screen.</p>
+    <div style="display:grid;gap:12px;max-width:400px">
+      <div>
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Display Name</label>
+        <input type="text" id="cu-name" placeholder="e.g. Jane Smith" style="width:100%;background:var(--bg3);border:1px solid var(--border2);border-radius:9px;color:var(--text);padding:10px 14px;font-family:'DM Sans';font-size:14px;outline:none">
+      </div>
+      <div>
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Email</label>
+        <input type="email" id="cu-email" placeholder="jane@example.com" style="width:100%;background:var(--bg3);border:1px solid var(--border2);border-radius:9px;color:var(--text);padding:10px 14px;font-family:'DM Sans';font-size:14px;outline:none">
+      </div>
+      <div>
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Temporary Password</label>
+        <input type="text" id="cu-pass" placeholder="At least 6 characters" value="WeighBet2024!" style="width:100%;background:var(--bg3);border:1px solid var(--border2);border-radius:9px;color:var(--text);padding:10px 14px;font-family:'DM Sans';font-size:14px;outline:none">
+      </div>
+      <div>
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Role</label>
+        <select id="cu-role" style="width:100%;background:var(--bg3);border:1px solid var(--border2);border-radius:9px;color:var(--text);padding:10px 14px;font-family:'DM Sans';font-size:14px;outline:none">
+          <option value="user">User (competitor)</option>
+          <option value="superAdmin">Super Admin</option>
+        </select>
+      </div>
+      <div id="cu-msg" style="font-size:13px"></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn-sm btn-success" onclick="createUser()" style="padding:10px 20px;font-size:14px">Create User</button>
+        <button class="btn-sm btn-muted" onclick="closeModal('user-modal')" style="padding:10px 20px;font-size:14px">Cancel</button>
+      </div>
+    </div>`;
+};
+
+window.createUser = async function() {
+  const name=$('cu-name').value.trim(), email=$('cu-email').value.trim(),
+        pass=$('cu-pass').value, role=$('cu-role').value;
+  const msg=$('cu-msg');
+  if(!name||!email||!pass){if(msg)msg.innerHTML='<span style="color:var(--danger)">Please fill in all fields.</span>';return;}
+  if(pass.length<6){if(msg)msg.innerHTML='<span style="color:var(--danger)">Password must be at least 6 characters.</span>';return;}
+  if(msg)msg.innerHTML='<span style="color:var(--muted)">⏳ Creating account...</span>';
+  try {
+    // Create Firebase Auth account using a secondary app instance to avoid signing out current admin
+    const { initializeApp, getApps } = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js");
+    const { getAuth: getAuth2, createUserWithEmailAndPassword: createUser2, updateProfile: updateProfile2 } = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js");
+    const secondaryAppName = 'secondary-'+Date.now();
+    const secondaryApp = initializeApp(app.options, secondaryAppName);
+    const secondaryAuth = getAuth2(secondaryApp);
+    const cred = await createUser2(secondaryAuth, email, pass);
+    await updateProfile2(cred.user, {displayName: name});
+    const uid = cred.user.uid;
+    await secondaryAuth.signOut();
+    // Write Firestore profile
+    await setDoc(doc(db,'users',uid), {
+      displayName:name, email, role, createdAt:serverTimestamp(), createdBy:currentUser.uid
+    });
+    if(msg)msg.innerHTML=`<span style="color:var(--success)">✅ User created! UID: ${uid}</span>`;
+    showAlert('User "'+name+'" created successfully.');
+    await loadUsers();
+  } catch(e) {
+    if(msg)msg.innerHTML='<span style="color:var(--danger)">Error: '+e.message+'</span>';
+  }
+};
+
+// ── DELETE USER ───────────────────────────────────────────────
+window.deleteUser = async function(uid, name) {
+  if(!confirm('Delete user "'+name+'"?\n\nThis will:\n• Remove them from all competitions\n• Delete their weigh-ins from all competitions\n• Delete their Firestore profile\n\nNote: their Firebase Auth account must be deleted separately from the Firebase console.')) return;
+  const msg=showAlert('⏳ Deleting...','warning');
+  try {
+    const batch=writeBatch(db);
+    // Remove from all competitions via competitionMembers index
+    const memSnap=await getDocs(query(collection(db,'competitionMembers'),where('userId','==',uid)));
+    const compIds=[...new Set(memSnap.docs.map(d=>d.data().compId).filter(Boolean))];
+    memSnap.docs.forEach(d=>batch.delete(d.ref));
+    // Delete their weigh-ins and member docs from each competition
+    for(const cid of compIds) {
+      batch.delete(doc(db,'competitions',cid,'members',uid));
+      const wiSnap=await getDocs(query(collection(db,'competitions',cid,'weighins'),where('userId','==',uid)));
+      wiSnap.docs.forEach(d=>batch.delete(d.ref));
+    }
+    // Delete personal tracker weigh-ins
+    const personalWI=await getDocs(collection(db,'users',uid,'weighins'));
+    personalWI.docs.forEach(d=>batch.delete(d.ref));
+    // Delete bug reports filed by this user
+    const bugSnap=await getDocs(query(collection(db,'bugReports'),where('userId','==',uid)));
+    bugSnap.docs.forEach(d=>batch.delete(d.ref));
+    // Delete user profile
+    batch.delete(doc(db,'users',uid));
+    await batch.commit();
+    showAlert('User "'+name+'" deleted. Remove their Auth account in Firebase Console if needed.');
+    await loadUsers();
+  } catch(e) { showAlert('Error: '+e.message,'danger'); }
+};
+
+// ── ADD USER TO COMPETITION ───────────────────────────────────
+window.openAddUserToComp = async function(uid) {
+  const modal=$('user-modal'), body=$('user-modal-body');
+  if(!modal||!body) return;
+  body.innerHTML='<div class="loading">Loading...</div>';
+  modal.style.display='flex';
+  try {
+    const [us, cs] = await Promise.all([
+      getDoc(doc(db,'users',uid)),
+      getDocs(query(collection(db,'competitions'),orderBy('name')))
+    ]);
+    const u={id:uid,...us.data()};
+    // Get comps user is already in
+    const memSnap=await getDocs(query(collection(db,'competitionMembers'),where('userId','==',uid)));
+    const alreadyIn=new Set(memSnap.docs.map(d=>d.data().compId));
+    const availableComps=cs.docs.map(d=>({id:d.id,...d.data()})).filter(c=>!alreadyIn.has(c.id)&&!c.archived);
+    body.innerHTML=`
+      <h2 style="font-family:Syne,sans-serif;font-weight:800;font-size:20px;margin-bottom:4px">+ Add to Competition</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:20px">Adding <strong style="color:var(--text)">${u.displayName||u.email}</strong> to a competition</p>
+      ${availableComps.length===0?'<p style="color:var(--muted)">This user is already in all active competitions, or no active competitions exist.</p>':`
+      <div style="display:grid;gap:12px;max-width:420px">
+        <div>
+          <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Competition</label>
+          <select id="atc-comp" style="width:100%;background:var(--bg3);border:1px solid var(--border2);border-radius:9px;color:var(--text);padding:10px 14px;font-family:'DM Sans';font-size:14px;outline:none">
+            ${availableComps.map(c=>`<option value="${c.id}" data-name="${encodeURIComponent(c.name||'')}">${c.name||'Unnamed'} ${c.startDate?'('+c.startDate+')':''}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Member Type</label>
+          <select id="atc-type" style="width:100%;background:var(--bg3);border:1px solid var(--border2);border-radius:9px;color:var(--text);padding:10px 14px;font-family:'DM Sans';font-size:14px;outline:none">
+            <option value="paying">Paying (contributes to prize pool)</option>
+            <option value="free">Free (on leaderboard, no prize)</option>
+          </select>
+        </div>
+        <div id="atc-msg" style="font-size:13px"></div>
+        <div style="display:flex;gap:8px">
+          <button class="btn-sm btn-success" data-uid="${uid}" onclick="addUserToComp(this.dataset.uid)" style="padding:10px 20px;font-size:14px">Add to Competition</button>
+          <button class="btn-sm btn-muted" onclick="viewUserDetail('${uid}')" style="padding:10px 20px;font-size:14px">← Back</button>
+        </div>
+      </div>`}`;
+  } catch(e) { body.innerHTML=`<div class="error-msg">${e.message}</div>`; }
+};
+
+window.addUserToComp = async function(uid) {
+  const compSel=$('atc-comp'), typeSel=$('atc-type'), msg=$('atc-msg');
+  if(!compSel||!typeSel) return;
+  const compId=compSel.value;
+  const compName=decodeURIComponent(compSel.options[compSel.selectedIndex]?.dataset?.name||'');
+  const playerType=typeSel.value;
+  if(!compId){if(msg)msg.innerHTML='<span style="color:var(--danger)">Select a competition.</span>';return;}
+  if(msg)msg.innerHTML='<span style="color:var(--muted)">⏳ Adding...</span>';
+  try {
+    const us=await getDoc(doc(db,'users',uid));
+    const u=us.data();
+    await setDoc(doc(db,'competitions',compId,'members',uid),{
+      uid, displayName:u.displayName||u.email||'', email:u.email||'',
+      role:'competitor', playerType, joinedAt:serverTimestamp()
+    });
+    await setDoc(doc(db,'competitionMembers',compId+'_'+uid),{
+      userId:uid, compId, compName, role:'competitor', playerType
+    });
+    showAlert((u.displayName||'User')+' added to "'+compName+'" as '+playerType+'.');
+    viewUserDetail(uid);
+  } catch(e) {
+    if(msg)msg.innerHTML='<span style="color:var(--danger)">Error: '+e.message+'</span>';
+  }
 };
 
 // ── BUG REPORTS ──────────────────────────────────────────────
@@ -956,6 +1129,26 @@ function renderSettings() {
 // ── MODAL ─────────────────────────────────────────────────────
 window.closeModal = function(id) { const el=$(id); if(el) el.style.display='none'; };
 
+window.mobileTab = function(tab) {
+  closeMobileMore();
+  switchTab(tab);
+  // Update mobile nav active state
+  document.querySelectorAll('.mobile-nav-item[data-tab]').forEach(el => {
+    el.classList.toggle('active', el.dataset.tab === tab);
+  });
+};
+window.toggleMobileMore = function() {
+  const sheet = $('mobile-more-sheet'), overlay = $('mobile-more-overlay');
+  const open = sheet && sheet.style.display === 'block';
+  if(sheet) sheet.style.display = open ? 'none' : 'block';
+  if(overlay) overlay.style.display = open ? 'none' : 'block';
+};
+window.closeMobileMore = function() {
+  const sheet = $('mobile-more-sheet'), overlay = $('mobile-more-overlay');
+  if(sheet) sheet.style.display = 'none';
+  if(overlay) overlay.style.display = 'none';
+};
+
 // Open the user app as a specific competitor.
 // Copies a deep-link to clipboard and offers to open it.
 // The admin must be logged into the user app with their SA account to use ghost mode.
@@ -1298,7 +1491,20 @@ code{font-family:'DM Mono',monospace;font-size:12px;background:var(--bg3);paddin
 .error-msg{color:var(--danger);padding:16px;background:rgba(224,82,82,0.08);border-radius:8px}
 .empty-state{text-align:center;padding:48px 20px;color:var(--muted)}
 .empty-state p{margin-top:8px}
-@media(max-width:900px){.stat-grid{grid-template-columns:repeat(2,1fr)}.sidebar{display:none}.main-content{padding:20px 16px}}
+@media(max-width:900px){
+  .stat-grid{grid-template-columns:repeat(2,1fr)}
+  .sidebar{display:none}
+  .main-content{padding:16px 14px;padding-bottom:84px}
+  .mobile-nav{display:flex!important}
+}
+.mobile-nav{display:none;position:fixed;bottom:0;left:0;right:0;z-index:50;background:var(--bg2);border-top:1px solid var(--border);padding:4px 0 env(safe-area-inset-bottom,4px)}
+.mobile-nav-item{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:6px 2px;border:none;background:none;cursor:pointer;color:var(--muted);font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.3px;min-width:0}
+.mobile-nav-item .mnav-icon{font-size:20px;line-height:1}
+.mobile-nav-item.active{color:var(--accent)}
+.mobile-more-sheet{display:none;position:fixed;bottom:62px;left:0;right:0;background:var(--bg2);border-top:1px solid var(--border2);z-index:49;padding:8px 0}
+.mobile-more-sheet button{display:flex;align-items:center;gap:12px;width:100%;padding:12px 20px;border:none;background:none;color:var(--text);font-size:14px;cursor:pointer;text-align:left}
+.mobile-more-sheet button:active{background:rgba(255,255,255,0.04)}
+.mobile-more-overlay{display:none;position:fixed;inset:0;z-index:48}
 </style>
 </head>
 <body>
@@ -1375,6 +1581,22 @@ code{font-family:'DM Mono',monospace;font-size:12px;background:var(--bg3);paddin
       <button class="nav-item"        data-tab="access"        onclick="switchTab('access')">🔐 Access Requests <span class="nav-badge" id="access-badge">0</span></button>
       <button class="nav-item"        data-tab="settings"      onclick="switchTab('settings')">⚙️ Settings</button>
     </nav>
+
+    <!-- MOBILE BOTTOM NAV -->
+    <nav class="mobile-nav" id="mobile-nav">
+      <button class="mobile-nav-item active" data-tab="dashboard"    onclick="mobileTab('dashboard')"><span class="mnav-icon">📊</span>Dashboard</button>
+      <button class="mobile-nav-item"        data-tab="competitions" onclick="mobileTab('competitions')"><span class="mnav-icon">🏆</span>Comps</button>
+      <button class="mobile-nav-item"        data-tab="users"        onclick="mobileTab('users')"><span class="mnav-icon">👥</span>Users</button>
+      <button class="mobile-nav-item"        data-tab="bugs"         onclick="mobileTab('bugs')"><span class="mnav-icon">🐛</span>Bugs</button>
+      <button class="mobile-nav-item"                                onclick="toggleMobileMore()"><span class="mnav-icon">⋯</span>More</button>
+    </nav>
+    <!-- MOBILE MORE SHEET -->
+    <div class="mobile-more-overlay" id="mobile-more-overlay" onclick="closeMobileMore()"></div>
+    <div class="mobile-more-sheet" id="mobile-more-sheet">
+      <button onclick="mobileTab('sandbox')">🧪 Sandbox</button>
+      <button onclick="mobileTab('access')">🔐 Access Requests <span class="nav-badge" id="access-badge-m" style="margin-left:auto">0</span></button>
+      <button onclick="mobileTab('settings')">⚙️ Settings</button>
+    </div>
     <main class="main-content">
 
       <div class="tab-panel" data-tab="dashboard" style="display:block">
