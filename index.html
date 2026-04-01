@@ -590,19 +590,24 @@ function startPersonalListeners() {
   getDoc(doc(db,'users',uid(),'tracker','goal')).then(s=>{ if(s.exists()) { trackerGoal=s.data(); refreshPage(); } else { trackerGoal=null; refreshPage(); } });
   // Check for unread SA replies to bug reports
   checkAdminNotes();
-  // Friendships
-  unsubs.push(onSnapshot(query(collection(db,'friendships'),where('users','array-contains',uid())),snap=>{
-    friends=snap.docs.map(d=>({id:d.id,...d.data()})).filter(f=>f.status==='accepted');
-    friendRequests=snap.docs.map(d=>({id:d.id,...d.data()})).filter(f=>f.status==='pending'&&f.to===uid());
-    updateBadges(); refreshPage();
-  }));
-  // Conversations
-  unsubs.push(onSnapshot(query(collection(db,'conversations'),where('participants','array-contains',uid())),snap=>{
-    conversations=snap.docs.map(d=>({id:d.id,...d.data()})); updateBadges(); refreshPage();
-  }));
-  unsubs.push(onSnapshot(query(collection(db,'groupChats'),where('members','array-contains',uid())),snap=>{
-    groupChats=snap.docs.map(d=>({id:d.id,...d.data()})); updateBadges(); refreshPage();
-  }));
+  // Friendships — wrapped in try/catch; rules may restrict access until verified
+  try {
+    unsubs.push(onSnapshot(query(collection(db,'friendships'),where('users','array-contains',uid())),snap=>{
+      friends=snap.docs.map(d=>({id:d.id,...d.data()})).filter(f=>f.status==='accepted');
+      friendRequests=snap.docs.map(d=>({id:d.id,...d.data()})).filter(f=>f.status==='pending'&&f.to===uid());
+      updateBadges(); refreshPage();
+    }, ()=>{}));
+  } catch(e){}
+  try {
+    unsubs.push(onSnapshot(query(collection(db,'conversations'),where('participants','array-contains',uid())),snap=>{
+      conversations=snap.docs.map(d=>({id:d.id,...d.data()})); updateBadges(); refreshPage();
+    }, ()=>{}));
+  } catch(e){}
+  try {
+    unsubs.push(onSnapshot(query(collection(db,'groupChats'),where('members','array-contains',uid())),snap=>{
+      groupChats=snap.docs.map(d=>({id:d.id,...d.data()})); updateBadges(); refreshPage();
+    }, ()=>{}));
+  } catch(e){}
 }
 
 function startCompListeners() {
@@ -633,9 +638,11 @@ function startCompListeners() {
     refreshPage();
   }));
   // Feed
-  unsubs.push(onSnapshot(query(collection(db,'feedPosts'),where('compId','==',currentCompId),orderBy('ts','desc')),snap=>{
-    feedPosts=snap.docs.map(d=>({id:d.id,...d.data()})); refreshPage();
-  }));
+  try {
+    unsubs.push(onSnapshot(query(collection(db,'feedPosts'),where('compId','==',currentCompId),orderBy('ts','desc')),snap=>{
+      feedPosts=snap.docs.map(d=>({id:d.id,...d.data()})); refreshPage();
+    }, ()=>{}));
+  } catch(e){}
 }
 
 function stopCompListeners() {
@@ -880,7 +887,7 @@ function renderSub(tab, sub) {
     case 'compete/prizes':    renderPrizes(); break;
     case 'compete/weekly':    renderWeekly(); break;
     case 'me/journey':        renderJourney(); break;
-    case 'me/log':            renderLog(); break;
+
     case 'me/profile':        renderProfile(); break;
     case 'social/feed':       renderFeed(); break;
     case 'social/friends':    renderFriends(); break;
@@ -1111,15 +1118,17 @@ function renderWeekly() {
     </div>`:''}
     ${matchContent}`;
 
-  // Scroll carousel to selected week
-  const carousel=$('wk-carousel');
-  if(carousel){
-    const slide=carousel.querySelector(`[data-week="${w}"]`);
-    if(slide){
-      const offset=slide.offsetLeft-carousel.offsetWidth/2+slide.offsetWidth/2;
-      carousel.scrollTo({left:offset,behavior:'smooth'});
+  // Scroll carousel to selected week — deferred so DOM is ready
+  setTimeout(()=>{
+    const carousel=$('wk-carousel');
+    if(carousel){
+      const slide=carousel.querySelector(`[data-week="${w}"]`);
+      if(slide){
+        const offset=slide.offsetLeft-carousel.offsetWidth/2+slide.offsetWidth/2;
+        carousel.scrollTo({left:offset,behavior:'smooth'});
+      }
     }
-  }
+  }, 0);
 }
 window.selectWeek=function(w){ selectedWeek=w; renderWeekly(); };
 
@@ -1190,6 +1199,40 @@ function renderMatchups() {
 }
 window.changeWeek=function(d){ const max=currentComp?.weeks||8; currentMatchupWeek=Math.max(1,Math.min(currentMatchupWeek+d,max)); renderMatchups(); };
 
+
+// Combined leaderboard for prizes tab — sortable by earnings or % lost
+function renderCombinedLb(earnList, lbStats, sortBy, myUid) {
+  const allUids=[...new Set([...earnList.map(e=>e.uid),...lbStats.map(c=>c.uid)])];
+  const rows=allUids.map(id=>{
+    const earn=earnList.find(e=>e.uid===id)?.total||0;
+    const pct=lbStats.find(c=>c.uid===id)?.pct||null;
+    return {uid:id, earn, pct};
+  });
+  const sorted=rows.slice().sort((a,b)=>sortBy==='earn'?(b.earn-a.earn):(b.pct||0)-(a.pct||0));
+  if(sorted.length===0) return '<div class="empty">No data yet.</div>';
+  return sorted.map((r,i)=>{
+    const isMe=r.uid===myUid;
+    const rc=i===0?'#f7d76a':i===1?'#c0c0c0':i===2?'#cd7f32':'var(--muted)';
+    return `<div class="earn-row ${isMe?'earn-me':''}">
+      <span style="font-weight:700;font-size:16px;width:24px;text-align:center;color:${rc}">${i+1}</span>
+      ${avatar(nameFor(r.uid),32)}
+      <span style="flex:1;font-weight:500;font-size:13px">${nameFor(r.uid)}${isMe?' <span class="tag">you</span>':''}</span>
+      <span style="text-align:right">
+        <div style="font-family:Syne,sans-serif;font-weight:800;font-size:16px;color:var(--accent3)">${fmtMoney(r.earn)}</div>
+        ${r.pct!=null?`<div style="font-size:11px;color:var(--accent2)">${fmtPct(r.pct)}</div>`:''}
+      </span>
+    </div>`;
+  }).join('');
+}
+// Store sort state globally so toggle persists
+window._lbSort='pct';
+window.setLbSort=function(sort){
+  window._lbSort=sort;
+  document.querySelectorAll('#lb-sort-earn,#lb-sort-pct').forEach(b=>b.classList.toggle('pill-active',b.id==='lb-sort-'+sort));
+  // Re-render just the list
+  renderPrizes();
+};
+
 // ─── COMPETE — PRIZES ────────────────────────────────────────────────────────
 function renderPrizes() {
   const el=$('panel-prizes'); if(!el) return;
@@ -1239,30 +1282,18 @@ function renderPrizes() {
       <div class="pp-val">${fmtMoney(wBL)}<span style="font-size:12px;color:var(--muted)">/wk</span></div>
     </div>
     <div class="card" style="margin-top:16px">
-      <div class="card-label">💰 Confirmed Earnings</div>
-      <p style="color:var(--muted);font-size:12px;margin-bottom:12px">H2H wins + weekly BL bonuses from completed weeks only. Biggest Loser prizes at competition end.</p>
-      ${earnList.length===0?`<div class="empty">No confirmed earnings yet.</div>`
-        :earnList.map((e,i)=>{
-          const isMe=e.uid===uid();
-          const rc=i===0?'#f7d76a':i===1?'#c0c0c0':i===2?'#cd7f32':'var(--muted)';
-          return `<div class="earn-row ${isMe?'earn-me':''}">
-            <span style="font-weight:700;font-size:16px;width:24px;text-align:center;color:${rc}">${i+1}</span>
-            ${avatar(nameFor(e.uid),32)}
-            <span style="flex:1;font-weight:500">${nameFor(e.uid)}${isMe?' <span class="tag">you</span>':''}</span>
-            <span style="font-family:Syne,sans-serif;font-weight:800;font-size:18px;color:var(--accent3)">${fmtMoney(e.total)}</span>
-          </div>`;
-        }).join('')}
-    </div>
-    ${pool>0&&lbStats.length>=2?`
-    <div class="card">
-      <div class="card-label">🏆 Biggest Loser Standings</div>
-      ${lbStats.map((c,i)=>{ const isMe=c.uid===uid(); return `<div class="lb-row ${isMe?'lb-me':''}">
-        <span class="lb-rank">${i===0?'🥇':i===1?'🥈':i===2?'🥉':i+1}</span>
-        ${avatar(c.name,28)}
-        <span class="lb-name">${c.name}${isMe?' <span class="tag">you</span>':''}</span>
-        <span class="lb-pct">${fmtPct(c.pct)}</span>
-      </div>`; }).join('')}
-    </div>`:''}`;
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <div class="card-label" style="margin-bottom:0">🏆 Leaderboard</div>
+        <div style="display:flex;gap:4px">
+          <button class="pill" id="lb-sort-earn" onclick="setLbSort('earn')" style="font-size:11px;padding:4px 10px">💰 Earnings</button>
+          <button class="pill pill-active" id="lb-sort-pct" onclick="setLbSort('pct')" style="font-size:11px;padding:4px 10px">📉 % Lost</button>
+        </div>
+      </div>
+      <p style="color:var(--muted);font-size:12px;margin-bottom:12px">H2H wins + weekly BL bonuses from completed weeks. Biggest Loser prizes at competition end.</p>
+      <div id="lb-combined-list">
+        ${renderCombinedLb(earnList, lbStats, window._lbSort||'pct', uid())}
+      </div>
+    </div>`;
 }
 
 // ─── ME — JOURNEY ────────────────────────────────────────────────────────────
@@ -1324,13 +1355,7 @@ function renderJourney() {
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
         ${['7d','30d','3m','6m','1y','all'].map(p=>`<button class="pill ${personalPeriod===p?'pill-active':''}" onclick="setPeriod('${p}')">${p}</button>`).join('')}
       </div>
-      <div style="display:flex;gap:6px;margin-bottom:8px">
-        <button class="pill ${progressMode==='personal'?'pill-active':''}" onclick="setProgMode('personal')">My weight</button>
-        <button class="pill ${progressMode==='compare'?'pill-active':''}" onclick="setProgMode('compare')">Compare</button>
-      </div>
-      ${progressMode==='compare'?`<select class="input" id="progress-compare-sel" onchange="onProgCompareChange()" style="margin-bottom:10px">
-        <option value="">Choose a competitor...</option>${compareOptions}
-      </select>`:''}
+
       <div style="position:relative;height:240px;min-height:180px"><canvas id="progress-chart-canvas" style="display:block"></canvas></div>
       ${wi.length<2?`<div class="empty" style="margin-top:8px">Log at least 2 weigh-ins to see your chart.</div>`:''}
     </div>
@@ -1488,7 +1513,7 @@ function renderLog() {
   el.innerHTML=`
     <div class="card">
       <div class="card-label">Log a Weigh-in</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px;align-items:end">
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px;margin-bottom:8px;align-items:end">
         <div><label class="label">Date</label><input type="date" id="wi-date" class="input" value="${ymd(new Date())}"></div>
         <div><label class="label">Weight</label><input type="number" id="wi-weight" class="input" placeholder="${sw?sw.weight.toFixed(1):'e.g. 84.5'}" step="0.1"></div>
         <div><label class="label">Unit</label><select id="wi-unit" class="input">${sw?`<option value="${sw.unit||'kg'}" selected>${sw.unit||'kg'}</option>`:'<option value="kg">kg</option><option value="lbs">lbs</option>'}</select></div>
@@ -1514,6 +1539,13 @@ function renderLog() {
   // Populate paginated history after HTML is set
   if(wi.length>0) renderHistBody();
 }
+
+
+window.openLog=function(){
+  // Show log as a panel on top — switch Me tab to log
+  showTab('me');
+  showSub('me','log');
+};
 
 window.submitWI=async function(){
   if(ghostUid){toast('Cannot submit weigh-ins while in Live View mode.','danger');return;}
@@ -1746,14 +1778,26 @@ function renderMsgTabContent() {
     if(!window._chatChannel) window._chatChannel='general';
     const filtered=chatMessages.filter(m=>m.channel===window._chatChannel||(window._chatChannel==='general'&&!m.channel));
     return `
-      <div style="display:flex;gap:4px;margin-bottom:10px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none">
-        ${CHANNELS.map(c=>`<button class="pill ${window._chatChannel===c?'pill-active':''}" onclick="setChatChannel('${c}')">${c.charAt(0).toUpperCase()+c.slice(1)}</button>`).join('')}
+      <div style="position:sticky;top:0;background:var(--bg2);z-index:2;padding-bottom:8px">
+        <div style="display:flex;gap:4px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none">
+          ${CHANNELS.map(c=>`<button class="pill ${window._chatChannel===c?'pill-active':''}" onclick="setChatChannel('${c}')" style="flex-shrink:0">${c.charAt(0).toUpperCase()+c.slice(1)}</button>`).join('')}
+        </div>
       </div>
-      <div id="chat-messages" style="max-height:300px;overflow-y:auto;margin-bottom:8px">
-        ${filtered.length===0?`<div class="empty">No messages in #${window._chatChannel} yet.</div>`:filtered.map(m=>{ const isMe=m.uid===uid(); return `<div style="display:flex;gap:8px;margin-bottom:8px;justify-content:${isMe?'flex-end':'flex-start'}"><div style="max-width:75%;background:${isMe?'rgba(124,106,247,0.2)':'var(--bg3)'};border-radius:12px;padding:8px 12px"><div style="font-size:11px;color:var(--muted);margin-bottom:2px">${isMe?'You':m.displayName}</div><div style="font-size:14px">${m.text}</div></div></div>`; }).join('')}
+      <div id="chat-messages" style="min-height:280px;max-height:360px;overflow-y:auto;padding:4px 0 8px">
+        ${filtered.length===0
+          ?`<div class="empty" style="padding-top:40px">No messages in #${window._chatChannel} yet. Say something!</div>`
+          :filtered.map(m=>{
+            const isMe=m.uid===uid();
+            const ts=m.ts?.toDate?m.ts.toDate().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'';
+            return `<div style="display:flex;flex-direction:column;align-items:${isMe?'flex-end':'flex-start'};margin-bottom:10px;padding:0 4px">
+              ${!isMe?`<div style="font-size:11px;color:var(--muted);margin-bottom:3px;padding-left:4px">${m.displayName}</div>`:''}
+              <div style="max-width:78%;background:${isMe?'var(--accent)':'var(--bg3)'};color:${isMe?'#fff':'var(--text)'};border-radius:${isMe?'16px 16px 4px 16px':'16px 16px 16px 4px'};padding:10px 14px;font-size:14px;line-height:1.45;word-break:break-word">${m.text}</div>
+              <div style="font-size:10px;color:var(--muted);margin-top:3px;padding:0 4px">${ts}</div>
+            </div>`;
+          }).join('')}
       </div>
-      <div style="display:flex;gap:8px">
-        <input class="input" id="chat-input" placeholder="Message #${window._chatChannel}..." style="flex:1" onkeydown="if(event.key==='Enter')postChat()">
+      <div style="display:flex;gap:8px;padding-top:4px;border-top:1px solid var(--border)">
+        <input class="input" id="chat-input" placeholder="#${window._chatChannel}..." style="flex:1" onkeydown="if(event.key==='Enter')postChat()">
         <button class="btn btn-primary btn-sm" onclick="postChat()">Send</button>
       </div>`;
   }
@@ -1775,8 +1819,9 @@ function renderMsgTabContent() {
   return '';
 }
 window.setMsgTab=function(tab){ currentChatTab=tab; renderMessages(); };
-window.postChat=async function(){ const text=$('chat-input')?.value.trim(); if(!text) return; await addDoc(collection(db,'competitions',currentCompId,'chat'),{text,uid:uid(),displayName:userProfile?.displayName||'',channel:window._chatChannel||'general',ts:serverTimestamp()}); if($('chat-input'))$('chat-input').value=''; };
-window.setChatChannel=function(ch){ window._chatChannel=ch; renderMessages(); };
+window.postChat=async function(){ const text=$('chat-input')?.value.trim(); if(!text) return; await addDoc(collection(db,'competitions',currentCompId,'chat'),{text,uid:uid(),displayName:userProfile?.displayName||'',channel:window._chatChannel||'general',ts:serverTimestamp()}); if($('chat-input'))$('chat-input').value=''; setTimeout(scrollChatToBottom,100); };
+function scrollChatToBottom(){ const el=$('chat-messages'); if(el) el.scrollTop=el.scrollHeight; }
+window.setChatChannel=function(ch){ window._chatChannel=ch; renderMessages(); setTimeout(scrollChatToBottom,50); };
 function renderDMThread() {
   const el=$('panel-messages'); if(!el) return;
   const conv=conversations.find(c=>c.id===activeDMId); if(!conv) { activeDMId=null; renderMessages(); return; }
@@ -2154,7 +2199,7 @@ p{line-height:1.6}
 .mob-nav-item.active{color:var(--accent)}
 
 /* ─── SUBTABS ────────────────────────────────────────────── */
-.subtab-bar{display:flex;gap:4px;overflow-x:auto;padding-bottom:4px;margin-bottom:16px;scrollbar-width:none}
+.subtab-bar{display:flex;gap:4px;overflow-x:auto;padding:8px 0 4px;margin-bottom:16px;scrollbar-width:none;position:sticky;top:0;background:var(--bg);z-index:10;border-bottom:1px solid var(--border)}
 .subtab-bar::-webkit-scrollbar{display:none}
 .subtab{padding:7px 14px;border-radius:99px;border:none;background:var(--bg3);color:var(--muted);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap;transition:all .15s}
 .subtab.active{background:rgba(124,106,247,0.15);color:var(--accent)}
@@ -2198,11 +2243,11 @@ p{line-height:1.6}
 .lb-pct{font-family:Syne,sans-serif;font-weight:700;font-size:15px;color:var(--accent2)}
 
 /* Prizes */
-.prize-pill{display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--bg2);border:1px solid var(--border2);border-radius:14px;padding:16px 18px;margin-bottom:10px}
-.pp-gold{border-color:rgba(247,215,106,0.3)}
-.pp-silver{border-color:rgba(192,192,192,0.3)}
-.pp-accent{border-color:rgba(124,106,247,0.25)}
-.pp-teal{border-color:rgba(95,212,179,0.25)}
+.prize-pill{display:flex;align-items:center;justify-content:space-between;gap:12px;border-radius:14px;padding:16px 18px;margin-bottom:10px}
+.pp-gold{background:rgba(247,215,106,0.07);border:1px solid rgba(247,215,106,0.3)}
+.pp-silver{background:rgba(192,192,192,0.06);border:1px solid rgba(192,192,192,0.3)}
+.pp-accent{background:rgba(124,106,247,0.07);border:1px solid rgba(124,106,247,0.25)}
+.pp-teal{background:rgba(95,212,179,0.07);border:1px solid rgba(95,212,179,0.25)}
 .pp-label{font-weight:600;font-size:14px;margin-bottom:2px}
 .pp-sub{font-size:12px;color:var(--muted)}
 .pp-val{font-family:Syne,sans-serif;font-weight:800;font-size:22px;white-space:nowrap}
@@ -2416,7 +2461,7 @@ select.input{cursor:pointer}
     <div id="tab-me" class="tab-panel" style="display:none">
       <div class="subtab-bar">
         <button class="subtab active" data-maintab="me" data-subtab="journey" onclick="showSub('me','journey')">📈 Journey</button>
-        <button class="subtab" data-maintab="me" data-subtab="log" onclick="showSub('me','log')">⚖️ Log</button>
+
         <button class="subtab" data-maintab="me" data-subtab="profile" onclick="showSub('me','profile')">👤 Profile</button>
       </div>
       <div data-subpanel="journey" data-maintab="me" id="panel-journey"></div>
@@ -2458,8 +2503,8 @@ select.input{cursor:pointer}
 </nav>
 
 <!-- Floating weigh-in button -->
-<button id="float-btn" onclick="showTab('me');showSub('me','log')"
-  style="display:none;position:fixed;bottom:80px;right:20px;z-index:39;width:52px;height:52px;border-radius:50%;background:var(--accent);color:#fff;border:none;font-size:24px;cursor:pointer;box-shadow:0 4px 16px rgba(124,106,247,0.4);align-items:center;justify-content:center">⚖️</button>
+<button id="float-btn" onclick="openLog()"
+  style="display:none;position:fixed;bottom:80px;right:20px;z-index:39;width:62px;height:62px;border-radius:50%;background:var(--accent);color:#fff;border:none;font-size:28px;cursor:pointer;box-shadow:0 6px 20px rgba(124,106,247,0.5);align-items:center;justify-content:center">⚖️</button>
 
 <!-- Ghost mode banner — shown when SA opens app via Live View from admin portal -->
 <div id="ghost-banner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;background:rgba(224,82,82,0.95);color:#fff;padding:8px 16px;align-items:center;gap:12px;font-size:13px;font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,0.3)">
