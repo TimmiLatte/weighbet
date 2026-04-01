@@ -1046,90 +1046,147 @@ function renderCompChart() {
 
 
 // ─── COMPETE — WEEKLY STATS ──────────────────────────────────────────────────
+function renderWeekScroller() {
+  var carousel  = document.getElementById('week-carousel');
+  var labelEl   = document.getElementById('week-carousel-label');
+  if(!carousel) return;
+  var weeks   = currentComp?.weeks || 8;
+  var curWeek = getCurrentWeek();
+  if(selectedWeek === null) selectedWeek = curWeek;
+
+  // Build slides using DOM (not innerHTML) — this is why the original worked
+  carousel.innerHTML = '';
+  for(var w = 1; w <= weeks; w++) {
+    var slide = document.createElement('div');
+    slide.className = 'week-carousel-slide';
+    slide.dataset.week = w;
+    var item = document.createElement('div');
+    var cls = 'week-carousel-item';
+    if(w === selectedWeek) cls += ' active';
+    if(w === curWeek) cls += ' current-week';
+    item.className = cls;
+    item.textContent = 'W' + w;
+    item.onclick = (function(wk) { return function() {
+      selectedWeek = wk;
+      var target = carousel.children[wk - 1];
+      if(target) carousel.scrollTo({ left: target.offsetLeft - carousel.offsetWidth/2 + target.offsetWidth/2, behavior: 'smooth' });
+      renderWeekScroller();
+    }; })(w);
+    slide.appendChild(item);
+    carousel.appendChild(slide);
+  }
+
+  // Scroll to selected (no animation on build)
+  var targetSlide = carousel.children[selectedWeek - 1];
+  if(targetSlide) carousel.scrollLeft = targetSlide.offsetLeft - carousel.offsetWidth/2 + targetSlide.offsetWidth/2;
+
+  // Label
+  if(labelEl) {
+    labelEl.textContent = 'Week ' + selectedWeek + ' of ' + weeks + (selectedWeek === curWeek ? ' · current week' : '');
+    labelEl.style.color = selectedWeek === curWeek ? 'var(--accent)' : 'var(--muted)';
+  }
+
+  // Attach scroll listener once
+  if(!carousel._scrollBound) {
+    carousel._scrollBound = true;
+    var scrollTimer = null;
+    carousel.addEventListener('scroll', function() {
+      clearTimeout(scrollTimer);
+      scrollTimer = setTimeout(function() {
+        var centre = carousel.scrollLeft + carousel.offsetWidth / 2;
+        var best = 1, bestDist = Infinity;
+        Array.from(carousel.children).forEach(function(slide) {
+          var mid = slide.offsetLeft + slide.offsetWidth / 2;
+          var dist = Math.abs(mid - centre);
+          if(dist < bestDist) { bestDist = dist; best = parseInt(slide.dataset.week); }
+        });
+        if(best !== selectedWeek) {
+          selectedWeek = best;
+          Array.from(carousel.children).forEach(function(slide) {
+            var item = slide.querySelector('.week-carousel-item');
+            var wn = parseInt(slide.dataset.week);
+            if(item) { item.classList.toggle('active', wn === selectedWeek); item.classList.toggle('current-week', wn === curWeek); }
+          });
+          if(labelEl) {
+            labelEl.textContent = 'Week ' + selectedWeek + ' of ' + weeks + (selectedWeek === curWeek ? ' · current week' : '');
+            labelEl.style.color = selectedWeek === curWeek ? 'var(--accent)' : 'var(--muted)';
+          }
+          renderWeekDetail(selectedWeek);
+        }
+      }, 80);
+    }, {passive:true});
+  }
+  renderWeekDetail(selectedWeek);
+}
+
 function renderWeekly() {
   const el=$('panel-weekly'); if(!el) return;
-  const weeks=currentComp?.weeks||8, curWk=getCurrentWeek();
-  if(selectedWeek===null) selectedWeek=curWk;
+  el.innerHTML=`
+    <div id="week-carousel-wrap">
+      <div id="week-carousel-window"></div>
+      <div id="week-carousel" style="padding-left:calc(50% - 40px);padding-right:calc(50% - 40px)"></div>
+    </div>
+    <div id="week-carousel-label" style="text-align:center;font-size:13px;color:var(--muted);margin:8px 0 14px"></div>
+    <div id="week-detail"></div>`;
+  renderWeekScroller();
+}
 
-  // Build scrollable week carousel
-  const slides=Array.from({length:weeks},(_,i)=>{
-    const w=i+1, isCur=w===curWk, isSel=w===selectedWeek;
-    return `<div class="wk-slide" data-week="${w}" onclick="selectWeek(${w})">
-      <div class="wk-item ${isSel?'wk-active':''} ${isCur?'wk-cur':''}">${w}</div>
-    </div>`;
-  }).join('');
+function renderWeekDetail(w) {
+  var weeks=currentComp?.weeks||8;
+  var pool=getPrizePool(), wBL=pool>0?+(pool*0.05/weeks).toFixed(2):0;
+  var el2=document.getElementById('week-detail'); if(!el2) return;
 
-  const pool=getPrizePool(), wBL=pool>0?+(pool*0.05/weeks).toFixed(2):0;
-  const w=selectedWeek;
-
-  // BL for selected week
-  const bl=payingMembers().map(c=>({uid:c.uid,name:c.displayName,pct:weeklyPctLost(c.uid,w)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct);
-
-  // Matchups for selected week
-  const wm=matchups.filter(m=>m.week===w);
-  let matchContent='';
+  var bl=payingMembers().map(function(c){return {uid:c.uid,name:c.displayName,pct:weeklyPctLost(c.uid,w)};}).filter(function(x){return x.pct!=null;}).sort(function(a,b){return b.pct-a.pct;});
+  var wm=matchups.filter(function(m){return m.week===w;});
+  var matchHtml='';
   if(!matchupsLoaded) {
-    matchContent='<div class="empty">⏳ Loading match data...</div>';
+    matchHtml='<div class="empty">⏳ Loading match data...</div>';
   } else if(wm.length===0) {
-    matchContent='<div class="empty">No matches for this week.</div>';
+    matchHtml='<div class="empty">No matches for this week.</div>';
   } else {
-    matchContent=wm.map(m=>{
-      const r=h2hResult(m,w);
-      const n1=nameFor(m.p1), n2=m.p2==='BYE'?'BYE':nameFor(m.p2);
-      const p1w=r.winner===m.p1, p2w=r.winner===m.p2;
-      const isMyMatch=m.p1===uid()||m.p2===uid();
-      return `<div class="card ${isMyMatch?'card-highlight':''}" style="margin-bottom:10px">
-        <div class="card-label">Week ${w} · ${r.matchType==='free'?'Friendly':r.matchType==='wildcard'?'Wildcard':'Head to Head'}</div>
-        <div class="matchup-vs">
-          <div class="matchup-player ${p2w?'dim':''}">
-            ${avatar(n1,44)}
-            <div class="mp-name">${p1w||r.tied?'👑 ':''}${n1}</div>
-            <div class="mp-pct ${p1w?'win':''}">${r.p1pct!=null?fmtPct(r.p1pct):'⏳ Pending'}</div>
-          </div>
-          <div class="vs-sep">VS</div>
-          <div class="matchup-player ${p1w?'dim':''}">
-            ${m.p2==='BYE'?`<div class="avatar-bye">BYE</div>`:avatar(n2,44)}
-            <div class="mp-name">${p2w||r.tied?'👑 ':''}${n2}</div>
-            <div class="mp-pct ${p2w?'win':''}">${m.p2==='BYE'?'—':r.p2pct!=null?fmtPct(r.p2pct):'⏳ Pending'}</div>
-          </div>
-        </div>
-        <div class="matchup-note ${r.winner===uid()||r.tied&&(m.p1===uid()||m.p2===uid())?'note-win':r.winner&&r.winner!==uid()&&(m.p1===uid()||m.p2===uid())?'note-loss':''}">${r.note}${r.prize>0&&r.winner?' · '+fmtMoney(r.prize):''}</div>
-      </div>`;
+    matchHtml=wm.map(function(m){
+      var r=h2hResult(m,w);
+      var n1=nameFor(m.p1), n2=m.p2==='BYE'?'BYE':nameFor(m.p2);
+      var p1w=r.winner===m.p1, p2w=r.winner===m.p2;
+      var isMe=m.p1===uid()||m.p2===uid();
+      var typeLabel=r.matchType==='wildcard'?'Wildcard':r.matchType==='free'?'Friendly':'H2H';
+      var myWin=r.winner===uid()||(r.tied&&isMe);
+      var myLoss=r.winner&&r.winner!==uid()&&isMe;
+      return '<div class="compact-match '+(isMe?'compact-match-me':'')+'">'
+        +'<div class="cm-label">Week '+w+' · '+typeLabel+'</div>'
+        +'<div class="cm-row">'
+          +'<div class="cm-player" style="opacity:'+(p2w&&!r.tied?0.45:1)+'">'
+            +avatar(n1,28)
+            +'<span class="cm-name">'+(p1w||r.tied?'👑 ':'')+n1+'</span>'
+            +'<span class="cm-pct" style="color:'+(p1w?'var(--success)':'var(--muted)');'">'+(r.p1pct!=null?fmtPct(r.p1pct):'—')+'</span>'
+          +'</div>'
+          +'<span class="cm-vs">VS</span>'
+          +'<div class="cm-player cm-player-right" style="opacity:'+(p1w&&!r.tied?0.45:1)+'">'
+            +'<span class="cm-pct" style="color:'+(p2w?'var(--success)':'var(--muted)')+';">'+(m.p2==='BYE'?'—':r.p2pct!=null?fmtPct(r.p2pct):'—')+'</span>'
+            +'<span class="cm-name">'+(p2w||r.tied?'👑 ':'')+n2+'</span>'
+            +(m.p2==='BYE'?'<div class="avatar-bye" style="width:28px;height:28px;font-size:9px">BYE</div>':avatar(n2,28))
+          +'</div>'
+        +'</div>'
+        +'<div class="cm-note '+(myWin?'cm-note-win':myLoss?'cm-note-loss':'')+'">'
+          +r.note+(r.prize>0&&r.winner?' · '+fmtMoney(r.prize):'')
+        +'</div>'
+      +'</div>';
     }).join('');
   }
 
-  el.innerHTML=`
-    <div class="wk-carousel-wrap">
-      <div class="wk-carousel" id="wk-carousel">${slides}</div>
-    </div>
-    <div style="text-align:center;font-size:13px;font-weight:600;color:${selectedWeek===curWk?'var(--accent)':'var(--muted)'};margin-bottom:14px">
-      Week ${w} of ${weeks}${selectedWeek===curWk?' · current week':''}
-    </div>
-    ${bl.length>0?`<div class="card card-bl">
-      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);margin-bottom:8px">📉 Biggest Loser</div>
-      <div style="display:flex;align-items:center;gap:10px">
-        ${avatar(bl[0].name,40)}
-        <div>
-          <div style="font-weight:700;font-size:15px">${bl[0].name}${bl[0].uid===uid()?' <span class="tag">you</span>':''}</div>
-          <div style="font-size:16px;font-weight:800;color:var(--accent2)">${fmtPct(bl[0].pct)}</div>
-        </div>
-        ${wBL>0?`<div style="margin-left:auto;font-weight:700;color:var(--accent3)">${fmtMoney(wBL)}</div>`:''}
-      </div>
-    </div>`:''}
-    ${matchContent}`;
-
-  // Scroll carousel to selected week — use rAF to ensure layout is complete
-  requestAnimationFrame(()=>{
-    const carousel=$('wk-carousel');
-    if(!carousel) return;
-    const slide=carousel.querySelector('[data-week="'+w+'"]');
-    if(slide){
-      const offset=slide.offsetLeft-carousel.offsetWidth/2+slide.offsetWidth/2;
-      carousel.scrollLeft=offset; // instant, not smooth, for initial render
-    }
-  });
+  el2.innerHTML=(bl.length>0?
+    '<div class="card card-bl" style="text-align:center;margin-bottom:10px">'
+      +'<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);margin-bottom:10px">📉 Weekly Biggest Loser</div>'
+      +'<div style="display:flex;flex-direction:column;align-items:center;gap:6px">'
+        +avatar(bl[0].name,48)
+        +'<div style="font-weight:700;font-size:16px">'+bl[0].name+(bl[0].uid===uid()?' <span class="tag">you</span>':'')+'</div>'
+        +'<div style="font-size:22px;font-weight:800;color:var(--accent2)">'+fmtPct(bl[0].pct)+'</div>'
+        +(wBL>0?'<div style="font-weight:700;color:var(--accent3)">'+fmtMoney(wBL)+' bonus</div>':'')
+      +'</div>'
+    +'</div>':'')+matchHtml;
 }
-window.selectWeek=function(w){ selectedWeek=w; renderWeekly(); };
+
+window.selectWeek=function(w){ selectedWeek=w; renderWeekScroller(); };
 
 // ─── COMPETE — H2H ───────────────────────────────────────────────────────────
 function renderMatchups() {
@@ -1837,24 +1894,26 @@ function renderMsgTabContent() {
     const CHANNELS=['general','recipes','tips','motivation'];
     if(!window._chatChannel) window._chatChannel='general';
     const filtered=chatMessages.filter(m=>m.channel===window._chatChannel||(window._chatChannel==='general'&&!m.channel));
-    const senderName=m=>m.displayName||nameFor(m.uid)||'Unknown';
+    // Build chat HTML using a function so variables are in scope (not inside template literal)
+    function buildChatMessages(messages) {
+      if(!messages.length) return '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--muted);font-size:13px">No messages yet. Say something!</div>';
+      return messages.map(function(m) {
+        var isMe = m.uid === uid();
+        var name = m.displayName || (competitors.find(function(c){return c.uid===m.uid;})?.displayName) || 'Unknown';
+        var ts = m.ts && m.ts.toDate ? m.ts.toDate().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '';
+        return '<div style="display:flex;flex-direction:column;align-items:'+(isMe?'flex-end':'flex-start')+';margin-bottom:12px">'
+          +(!isMe?'<div style="font-size:11px;font-weight:600;color:var(--accent);margin-bottom:4px;padding:0 4px">'+name+'</div>':'')
+          +'<div style="max-width:75%;background:'+(isMe?'var(--accent)':'var(--bg2)')+';color:'+(isMe?'#fff':'var(--text)')+';border-radius:'+(isMe?'18px 18px 4px 18px':'18px 18px 18px 4px')+';padding:10px 14px;font-size:14px;line-height:1.5;word-break:break-word;box-shadow:0 1px 4px rgba(0,0,0,0.15)">'+m.text+'</div>'
+          +'<div style="font-size:10px;color:var(--muted);margin-top:3px;padding:0 6px">'+(isMe?'You · ':'')+ts+'</div>'
+          +'</div>';
+      }).join('');
+    }
     return `
       <div style="display:flex;gap:4px;overflow-x:auto;padding-bottom:8px;scrollbar-width:none;flex-shrink:0">
         ${CHANNELS.map(c=>`<button class="pill ${window._chatChannel===c?'pill-active':''}" onclick="setChatChannel('${c}')" style="flex-shrink:0">${c.charAt(0).toUpperCase()+c.slice(1)}</button>`).join('')}
       </div>
       <div id="chat-messages" style="flex:1;overflow-y:auto;border:1px solid var(--border);border-radius:12px;background:var(--bg3);padding:12px;min-height:0">
-        ${filtered.length===0
-          ?`<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--muted);font-size:13px">No messages in #${window._chatChannel} yet. Say something!</div>`
-          :filtered.map(m=>{
-            const isMe=m.uid===uid();
-            const name=senderName(m);
-            const ts=m.ts?.toDate?m.ts.toDate().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'';
-            return `<div style="display:flex;flex-direction:column;align-items:${isMe?'flex-end':'flex-start'};margin-bottom:12px">
-              ${!isMe?`<div style="font-size:11px;font-weight:600;color:var(--accent);margin-bottom:4px;padding:0 4px">${name}</div>`:''}
-              <div style="max-width:75%;background:${isMe?'var(--accent)':'var(--bg2)'};color:${isMe?'#fff':'var(--text)'};border-radius:${isMe?'18px 18px 4px 18px':'18px 18px 18px 4px'};padding:10px 14px;font-size:14px;line-height:1.5;word-break:break-word;box-shadow:0 1px 4px rgba(0,0,0,0.15)">${m.text}</div>
-              <div style="font-size:10px;color:var(--muted);margin-top:3px;padding:0 6px">${isMe?'You · ':''} ${ts}</div>
-            </div>`;
-          }).join('')}
+        ${buildChatMessages(filtered)}
       </div>
       <div style="display:flex;gap:8px;padding-top:8px;flex-shrink:0">
         <input class="input" id="chat-input" placeholder="Message #${window._chatChannel}..." style="flex:1" onkeydown="if(event.key==='Enter')postChat()">
@@ -2259,9 +2318,7 @@ p{line-height:1.6}
 .mob-nav-item.active{color:var(--accent)}
 
 /* ─── SUBTABS ────────────────────────────────────────────── */
-.subtab-bar{display:flex;gap:4px;overflow-x:auto;padding:10px 0 6px;margin-bottom:16px;scrollbar-width:none;position:sticky;top:0;background:var(--bg);z-index:10;border-bottom:1px solid var(--border);margin-top:-4px}
-/* Ensure sticky bar background covers scrolling content underneath */
-.subtab-bar::before{content:'';position:absolute;inset:0;background:inherit;z-index:-1}
+.subtab-bar{display:flex;gap:4px;overflow-x:auto;padding:10px 0 8px;margin-bottom:16px;scrollbar-width:none;position:sticky;top:0;z-index:10;background:var(--bg);box-shadow:0 6px 0 0 var(--bg)}
 .subtab-bar::-webkit-scrollbar{display:none}
 .subtab{padding:7px 14px;border-radius:99px;border:none;background:var(--bg3);color:var(--muted);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap;transition:all .15s}
 .subtab.active{background:rgba(124,106,247,0.15);color:var(--accent)}
@@ -2406,14 +2463,47 @@ select.input{cursor:pointer}
 .nav-badge{background:var(--danger);color:#fff;border-radius:99px;font-size:10px;padding:1px 6px;font-weight:700;display:inline-block}
 
 /* Week carousel */
-.wk-carousel-wrap{overflow-x:auto;scrollbar-width:none;margin-bottom:12px}
-.wk-carousel-wrap::-webkit-scrollbar{display:none}
-.wk-carousel{display:flex;gap:6px;padding:4px 8px}
-.wk-slide{flex-shrink:0;cursor:pointer}
-.wk-item{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;background:var(--bg3);color:var(--muted);transition:all .15s}
-.wk-item.wk-active{background:rgba(124,106,247,0.2);color:var(--accent)}
-.wk-item.wk-cur{border:2px solid var(--accent2)}
-.wk-item.wk-active.wk-cur{background:rgba(124,106,247,0.2);border-color:var(--accent)}
+/* Week carousel — ported from original working version */
+#week-carousel-wrap{position:relative;margin:12px 0 4px}
+#week-carousel-window{
+  position:absolute;top:50%;left:50%;
+  transform:translate(-50%,-50%);
+  width:64px;height:64px;border-radius:14px;
+  border:2.5px solid var(--accent);
+  box-shadow:0 0 0 4px rgba(124,106,247,0.12);
+  pointer-events:none;z-index:3;
+}
+#week-carousel-wrap::before,#week-carousel-wrap::after{
+  content:'';position:absolute;top:0;bottom:0;width:60px;pointer-events:none;z-index:2;
+}
+#week-carousel-wrap::before{left:0;background:linear-gradient(to right,var(--bg2) 20%,transparent)}
+#week-carousel-wrap::after{right:0;background:linear-gradient(to left,var(--bg2) 20%,transparent)}
+#week-carousel{
+  display:flex;overflow-x:scroll;scroll-snap-type:x mandatory;
+  -webkit-overflow-scrolling:touch;scrollbar-width:none;-ms-overflow-style:none;padding:10px 0;
+}
+#week-carousel::-webkit-scrollbar{display:none}
+.week-carousel-slide{flex-shrink:0;width:80px;scroll-snap-align:center;display:flex;align-items:center;justify-content:center;}
+.week-carousel-item{width:60px;height:60px;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:'Syne',sans-serif;font-weight:600;font-size:15px;cursor:pointer;color:var(--muted);transition:color .15s,font-size .15s,font-weight .15s;user-select:none;border-radius:12px;}
+.week-carousel-item.active{color:var(--accent);font-weight:800;font-size:19px;}
+.week-carousel-item.current-week{color:var(--accent2);font-weight:700;text-decoration:underline;text-underline-offset:3px;}
+.week-carousel-item.active.current-week{color:var(--accent);font-weight:800;font-size:19px;text-decoration:none;}
+.week-carousel-item:hover:not(.active){color:var(--text)}
+
+/* Compact match rows */
+.compact-match{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:10px 14px;margin-bottom:8px}
+.compact-match-me{border-color:rgba(124,106,247,0.35);background:rgba(124,106,247,0.04)}
+.cm-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);margin-bottom:8px}
+.cm-row{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px}
+.cm-player{display:flex;align-items:center;gap:6px;min-width:0}
+.cm-player-right{flex-direction:row-reverse}
+.cm-name{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.cm-player-right .cm-name{text-align:right}
+.cm-pct{font-size:13px;font-weight:700;flex-shrink:0}
+.cm-vs{font-size:10px;font-weight:800;color:var(--muted);text-align:center;flex-shrink:0}
+.cm-note{font-size:11px;color:var(--muted);margin-top:6px;padding-top:6px;border-top:1px solid var(--border);text-align:center}
+.cm-note-win{color:var(--success)}
+.cm-note-loss{color:var(--danger)}
 
 /* Toast */
 .toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:10px 20px;border-radius:10px;font-size:14px;font-weight:500;z-index:9999;white-space:nowrap;display:none}
