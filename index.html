@@ -791,7 +791,7 @@ function renderSelectScreen() {
     <div class="section-label" style="margin-top:24px">Create a Competition</div>
     <div style="display:grid;gap:8px">
       <input id="new-comp-name" class="input" placeholder="Competition name">
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px">
         <div><label class="label">Start date</label><input type="date" id="new-comp-start" class="input"></div>
         <div><label class="label">Weeks</label><input type="number" id="new-comp-weeks" class="input" value="8" min="1" max="52"></div>
         <div><label class="label">Buy-in ($)</label><input type="number" id="new-comp-buyin" class="input" value="50" min="0"></div>
@@ -877,7 +877,6 @@ function renderSub(tab, sub) {
   const key=tab+'/'+sub;
   switch(key) {
     case 'compete/overview':  renderOverview(); break;
-    case 'compete/h2h':       renderMatchups(); break;
     case 'compete/prizes':    renderPrizes(); break;
     case 'compete/weekly':    renderWeekly(); break;
     case 'me/journey':        renderJourney(); break;
@@ -1026,7 +1025,15 @@ function renderCompChart() {
   dashChart=new window.Chart(canvas,{type:'line',data:{labels,datasets},options:{
     responsive:true,maintainAspectRatio:true,
     plugins:{legend:{display:true,position:'bottom',labels:{color:'#9090a0',font:{family:'DM Sans',size:11},boxWidth:12}}},
-    scales:{x:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#9090a0',font:{size:11}}},y:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#9090a0',font:{size:11},callback:v=>v.toFixed(1)+'%'}}}
+    scales:{
+      x:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#9090a0',font:{size:11}}},
+      y:{
+        grid:{color:'rgba(255,255,255,0.05)'},
+        ticks:{color:'#9090a0',font:{size:11},callback:v=>v.toFixed(1)+'%'},
+        // Buffer above and below min/max so lines don't touch edges
+        afterDataLimits(scale){scale.max+=0.3;scale.min-=0.3;}
+      }
+    }
   }});
 }
 
@@ -1063,23 +1070,23 @@ function renderWeekly() {
       const r=h2hResult(m,w);
       const n1=nameFor(m.p1), n2=m.p2==='BYE'?'BYE':nameFor(m.p2);
       const p1w=r.winner===m.p1, p2w=r.winner===m.p2;
-      return `<div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:6px;padding:8px 0;border-bottom:1px solid var(--border)">
-        <div style="display:flex;align-items:center;gap:6px;min-width:0;opacity:${p2w?0.4:1}">
-          ${avatar(n1,24)}
-          <div style="min-width:0">
-            <div style="font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p1w||r.tied?'👑 ':''}${n1}</div>
-            <div style="font-size:11px;color:${p1w?'var(--success)':'var(--muted)'};font-weight:600">${r.p1pct!=null?fmtPct(r.p1pct):'—'}</div>
+      const isMyMatch=m.p1===uid()||m.p2===uid();
+      return `<div class="card ${isMyMatch?'card-highlight':''}" style="margin-bottom:10px">
+        <div class="card-label">Week ${w} · ${r.matchType==='free'?'Friendly':r.matchType==='wildcard'?'Wildcard':'Head to Head'}</div>
+        <div class="matchup-vs">
+          <div class="matchup-player ${p2w?'dim':''}">
+            ${avatar(n1,44)}
+            <div class="mp-name">${p1w||r.tied?'👑 ':''}${n1}</div>
+            <div class="mp-pct ${p1w?'win':''}">${r.p1pct!=null?fmtPct(r.p1pct):'⏳ Pending'}</div>
+          </div>
+          <div class="vs-sep">VS</div>
+          <div class="matchup-player ${p1w?'dim':''}">
+            ${m.p2==='BYE'?`<div class="avatar-bye">BYE</div>`:avatar(n2,44)}
+            <div class="mp-name">${p2w||r.tied?'👑 ':''}${n2}</div>
+            <div class="mp-pct ${p2w?'win':''}">${m.p2==='BYE'?'—':r.p2pct!=null?fmtPct(r.p2pct):'⏳ Pending'}</div>
           </div>
         </div>
-        <div style="font-size:10px;font-weight:700;color:var(--muted);text-align:center">VS</div>
-        <div style="display:flex;align-items:center;gap:6px;justify-content:flex-end;min-width:0;opacity:${p1w?0.4:1}">
-          <div style="text-align:right;min-width:0">
-            <div style="font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p2w||r.tied?'👑 ':''}${n2}</div>
-            <div style="font-size:11px;color:${p2w?'var(--success)':'var(--muted)'};font-weight:600">${m.p2==='BYE'?'—':r.p2pct!=null?fmtPct(r.p2pct):'—'}</div>
-          </div>
-          ${m.p2==='BYE'?`<div style="width:24px;height:24px;border-radius:50%;background:var(--bg3);display:flex;align-items:center;justify-content:center;font-size:9px;color:var(--muted)">BYE</div>`:avatar(n2,24)}
-        </div>
-        ${r.prize>0&&r.winner?`<div style="grid-column:1/-1;font-size:11px;color:var(--accent3);font-weight:600;text-align:center">${fmtMoney(r.prize)} → ${nameFor(r.winner)}</div>`:''}
+        <div class="matchup-note ${r.winner===uid()||r.tied&&(m.p1===uid()||m.p2===uid())?'note-win':r.winner&&r.winner!==uid()&&(m.p1===uid()||m.p2===uid())?'note-loss':''}">${r.note}${r.prize>0&&r.winner?' · '+fmtMoney(r.prize):''}</div>
       </div>`;
     }).join('');
   }
@@ -1102,10 +1109,7 @@ function renderWeekly() {
         ${wBL>0?`<div style="margin-left:auto;font-weight:700;color:var(--accent3)">${fmtMoney(wBL)}</div>`:''}
       </div>
     </div>`:''}
-    <div class="card">
-      <div class="card-label">⚔️ H2H Matches</div>
-      ${matchContent}
-    </div>`;
+    ${matchContent}`;
 
   // Scroll carousel to selected week
   const carousel=$('wk-carousel');
@@ -1327,7 +1331,7 @@ function renderJourney() {
       ${progressMode==='compare'?`<select class="input" id="progress-compare-sel" onchange="onProgCompareChange()" style="margin-bottom:10px">
         <option value="">Choose a competitor...</option>${compareOptions}
       </select>`:''}
-      <div style="position:relative;height:200px"><canvas id="progress-chart-canvas"></canvas></div>
+      <div style="position:relative;height:240px;min-height:180px"><canvas id="progress-chart-canvas" style="display:block"></canvas></div>
       ${wi.length<2?`<div class="empty" style="margin-top:8px">Log at least 2 weigh-ins to see your chart.</div>`:''}
     </div>
 
@@ -1373,7 +1377,7 @@ function renderJourney() {
       ${(()=>{const b=calcAchievements(uid());return b.length===0?'<div class="empty">Keep logging weigh-ins to earn badges!</div>':b.map(b=>`<div style="display:flex;align-items:center;gap:12px;padding:8px 12px;background:var(--bg3);border-radius:10px;border:1px solid ${b.color}33;margin-bottom:6px"><span style="font-size:22px">${b.icon}</span><div><div style="font-weight:600;font-size:13px;color:${b.color}">${b.label}</div><div style="font-size:12px;color:var(--muted)">${b.desc}</div></div></div>`).join('');})()}
     </div>`;
 
-  if(wi.length>=2) renderProgressChart();
+  if(wi.length>=2) setTimeout(renderProgressChart, 0);
 }
 
 window.setPeriod=function(p){ personalPeriod=p; renderJourney(); };
@@ -1400,13 +1404,78 @@ window.saveGoal=async function(){
 function renderProgressChart() {
   const canvas=$('progress-chart-canvas'); if(!canvas) return;
   if(progressChart) { progressChart.destroy(); progressChart=null; }
-  const wi=personalWeighIns; if(wi.length<2) return;
-  const labels=wi.map(w=>{ try{return new Date(w.date+'T00:00:00').toLocaleDateString('en-NZ',{day:'numeric',month:'short'});}catch(e){return w.date;} });
-  const data=wi.map(w=>w.weight);
+  let allWI=personalWeighIns.slice().sort((a,b)=>a.date.localeCompare(b.date));
+  if(allWI.length<2) return;
+
+  // Filter by period
+  const pStart=getPersonalPeriodStart();
+  let wi=pStart?allWI.filter(e=>e.date>=pStart):allWI;
+  if(wi.length<2) wi=allWI.slice(-14);
+
+  // Downsample for long periods
+  const display=(personalPeriod==='1y'||personalPeriod==='all')?downsampleWeekly(wi):wi;
+  const sw=allWI[0];
+  const MONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const usePct=personalPeriod==='3m'||personalPeriod==='6m'||personalPeriod==='1y'||personalPeriod==='all';
+
+  const labels=display.map(e=>{
+    const d=new Date(e.date+'T00:00:00');
+    return d.getDate()+' '+MONTHS[d.getMonth()]+(personalPeriod==='1y'||personalPeriod==='all'?' '+String(d.getFullYear()).slice(2):'');
+  });
+  const myData=display.map(e=>usePct?+((e.weight-sw.weight)/sw.weight*100).toFixed(2):e.weight);
+
+  // Trend line
+  const n=myData.length, xs=myData.map((_,i)=>i);
+  const sX=xs.reduce((a,b)=>a+b,0), sY=myData.reduce((a,b)=>a+b,0);
+  const sXY=xs.reduce((a,x,i)=>a+x*myData[i],0), sX2=xs.reduce((a,x)=>a+x*x,0);
+  const den=n*sX2-sX*sX, slope=den?(n*sXY-sX*sY)/den:0, intcpt=(sY-slope*sX)/n;
+  const trend=xs.map(x=>+(intcpt+slope*x).toFixed(2));
+
+  const datasets=[
+    {label:usePct?'Weight change %':'My weight',data:myData,borderColor:'#7c6af7',backgroundColor:'rgba(124,106,247,0.1)',borderWidth:2,pointRadius:display.length>30?2:3,tension:0.2,fill:false,spanGaps:true},
+    {label:'Trend',data:trend,borderColor:'#f7b26a',backgroundColor:'transparent',pointRadius:0,borderDash:[5,3],borderWidth:1.5,fill:false}
+  ];
+
+  // Compare mode — overlay competitor's line
+  if(progressMode==='compare'&&compareUid) {
+    const cName=nameFor(compareUid);
+    const cAllWI=weighInsFor(compareUid).sort((a,b)=>a.date.localeCompare(b.date));
+    if(cAllWI.length>=2) {
+      const cSW=cAllWI[0];
+      const cFiltered=pStart?cAllWI.filter(e=>e.date>=pStart):cAllWI;
+      const cDisplay=(personalPeriod==='1y'||personalPeriod==='all')?downsampleWeekly(cFiltered):cFiltered;
+      const cData=display.map(targetEntry=>{
+        if(!cDisplay.length) return null;
+        const closest=cDisplay.reduce((a,b)=>
+          Math.abs(new Date(b.date+'T00:00:00')-new Date(targetEntry.date+'T00:00:00'))<
+          Math.abs(new Date(a.date+'T00:00:00')-new Date(targetEntry.date+'T00:00:00'))?b:a
+        );
+        const daysDiff=Math.abs((new Date(closest.date+'T00:00:00')-new Date(targetEntry.date+'T00:00:00'))/(24*60*60*1000));
+        if(daysDiff>7) return null;
+        return usePct?+((closest.weight-cSW.weight)/cSW.weight*100).toFixed(2):closest.weight;
+      });
+      if(cData.some(v=>v!==null)) {
+        datasets.push({label:cName,data:cData,borderColor:'#5fd4b3',backgroundColor:'rgba(95,212,179,0.1)',borderWidth:2,pointRadius:2,tension:0.2,fill:false,spanGaps:true});
+      }
+    }
+  }
+
   if(!window.Chart) return;
-  progressChart=new window.Chart(canvas,{type:'line',data:{labels,datasets:[{label:'Weight',data,borderColor:'#7c6af7',backgroundColor:'rgba(124,106,247,0.1)',borderWidth:2,pointRadius:3,tension:0.3}]},options:{
-    responsive:true,plugins:{legend:{display:false}},
-    scales:{x:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#9090a0',font:{size:10},maxRotation:45}},y:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#9090a0',font:{size:11}}}}
+  const yVals=myData.filter(v=>v!=null);
+  const yMin=Math.min(...yVals), yMax=Math.max(...yVals);
+  const yPad=Math.max((yMax-yMin)*0.15, usePct?0.5:1);
+
+  progressChart=new window.Chart(canvas,{type:'line',data:{labels,datasets},options:{
+    responsive:true, maintainAspectRatio:false,
+    plugins:{legend:{display:datasets.length>1,labels:{color:'#9090a0',font:{family:'DM Sans',size:11},boxWidth:12}}},
+    scales:{
+      x:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#9090a0',maxTicksLimit:6}},
+      y:{
+        min:+(yMin-yPad).toFixed(1), max:+(yMax+yPad).toFixed(1),
+        grid:{color:'rgba(255,255,255,0.05)'},
+        ticks:{color:'#9090a0',callback:v=>usePct?v.toFixed(1)+'%':v.toFixed(1)}
+      }
+    }
   }});
 }
 
@@ -1673,8 +1742,20 @@ function renderMessages() {
 }
 function renderMsgTabContent() {
   if(currentChatTab==='chat') {
-    return `<div id="chat-messages" style="max-height:320px;overflow-y:auto;margin-bottom:8px">${chatMessages.map(m=>{ const isMe=m.uid===uid(); return `<div style="display:flex;gap:8px;margin-bottom:8px;justify-content:${isMe?'flex-end':'flex-start'}"><div style="max-width:75%;background:${isMe?'rgba(124,106,247,0.2)':'var(--bg3)'};border-radius:12px;padding:8px 12px"><div style="font-size:11px;color:var(--muted);margin-bottom:2px">${isMe?'You':m.displayName}</div><div style="font-size:14px">${m.text}</div></div></div>`; }).join('')}</div>
-    <div style="display:flex;gap:8px"><input class="input" id="chat-input" placeholder="Message..." style="flex:1" onkeydown="if(event.key==='Enter')postChat()"><button class="btn btn-primary btn-sm" onclick="postChat()">Send</button></div>`;
+    const CHANNELS=['general','recipes','tips','motivation'];
+    if(!window._chatChannel) window._chatChannel='general';
+    const filtered=chatMessages.filter(m=>m.channel===window._chatChannel||(window._chatChannel==='general'&&!m.channel));
+    return `
+      <div style="display:flex;gap:4px;margin-bottom:10px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none">
+        ${CHANNELS.map(c=>`<button class="pill ${window._chatChannel===c?'pill-active':''}" onclick="setChatChannel('${c}')">${c.charAt(0).toUpperCase()+c.slice(1)}</button>`).join('')}
+      </div>
+      <div id="chat-messages" style="max-height:300px;overflow-y:auto;margin-bottom:8px">
+        ${filtered.length===0?`<div class="empty">No messages in #${window._chatChannel} yet.</div>`:filtered.map(m=>{ const isMe=m.uid===uid(); return `<div style="display:flex;gap:8px;margin-bottom:8px;justify-content:${isMe?'flex-end':'flex-start'}"><div style="max-width:75%;background:${isMe?'rgba(124,106,247,0.2)':'var(--bg3)'};border-radius:12px;padding:8px 12px"><div style="font-size:11px;color:var(--muted);margin-bottom:2px">${isMe?'You':m.displayName}</div><div style="font-size:14px">${m.text}</div></div></div>`; }).join('')}
+      </div>
+      <div style="display:flex;gap:8px">
+        <input class="input" id="chat-input" placeholder="Message #${window._chatChannel}..." style="flex:1" onkeydown="if(event.key==='Enter')postChat()">
+        <button class="btn btn-primary btn-sm" onclick="postChat()">Send</button>
+      </div>`;
   }
   if(currentChatTab==='dms') {
     return conversations.length===0?`<div class="empty">No direct messages. Start one from your friends list.</div>`:conversations.map(c=>{
@@ -1694,7 +1775,8 @@ function renderMsgTabContent() {
   return '';
 }
 window.setMsgTab=function(tab){ currentChatTab=tab; renderMessages(); };
-window.postChat=async function(){ const text=$('chat-input')?.value.trim(); if(!text) return; await addDoc(collection(db,'competitions',currentCompId,'chat'),{text,uid:uid(),displayName:userProfile?.displayName||'',ts:serverTimestamp()}); if($('chat-input'))$('chat-input').value=''; };
+window.postChat=async function(){ const text=$('chat-input')?.value.trim(); if(!text) return; await addDoc(collection(db,'competitions',currentCompId,'chat'),{text,uid:uid(),displayName:userProfile?.displayName||'',channel:window._chatChannel||'general',ts:serverTimestamp()}); if($('chat-input'))$('chat-input').value=''; };
+window.setChatChannel=function(ch){ window._chatChannel=ch; renderMessages(); };
 function renderDMThread() {
   const el=$('panel-messages'); if(!el) return;
   const conv=conversations.find(c=>c.id===activeDMId); if(!conv) { activeDMId=null; renderMessages(); return; }
@@ -1771,7 +1853,7 @@ function renderAdminSettings() {
     <div class="card">
       <div class="card-label">⚙️ Competition Settings</div>
       <div class="form-group"><label class="label">Name</label><input id="admin-name" class="input" value="${currentComp?.name||''}"></div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px">
         <div class="form-group"><label class="label">Start Date</label><input type="date" id="admin-start" class="input" value="${currentComp?.startDate||''}"></div>
         <div class="form-group"><label class="label">Weeks</label><input type="number" id="admin-weeks" class="input" value="${currentComp?.weeks||8}" min="1" max="52"></div>
         <div class="form-group"><label class="label">Buy-in ($)</label><input type="number" id="admin-buyin" class="input" value="${currentComp?.buyin||0}" min="0"></div>
@@ -2124,6 +2206,10 @@ p{line-height:1.6}
 .pp-label{font-weight:600;font-size:14px;margin-bottom:2px}
 .pp-sub{font-size:12px;color:var(--muted)}
 .pp-val{font-family:Syne,sans-serif;font-weight:800;font-size:22px;white-space:nowrap}
+.pp-gold .pp-label{color:#f7d76a}.pp-gold .pp-val{color:#f7d76a}
+.pp-silver .pp-label{color:#c0c0c0}.pp-silver .pp-val{color:#c0c0c0}
+.pp-accent .pp-label{color:var(--accent)}.pp-accent .pp-val{color:var(--accent)}
+.pp-teal .pp-label{color:var(--accent2)}.pp-teal .pp-val{color:var(--accent2)}
 .earn-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border)}
 .earn-row:last-child{border-bottom:none}
 .earn-row.earn-me{background:rgba(124,106,247,0.05);border-radius:8px;padding:10px 8px;margin:2px -8px}
@@ -2318,12 +2404,10 @@ select.input{cursor:pointer}
     <div id="tab-compete" class="tab-panel">
       <div class="subtab-bar">
         <button class="subtab active" data-maintab="compete" data-subtab="overview" onclick="showSub('compete','overview')">🏠 Overview</button>
-        <button class="subtab" data-maintab="compete" data-subtab="h2h" onclick="showSub('compete','h2h')">⚔️ H2H</button>
-        <button class="subtab" data-maintab="compete" data-subtab="weekly" onclick="showSub('compete','weekly')">📅 Weekly</button>
+        <button class="subtab" data-maintab="compete" data-subtab="weekly" onclick="showSub('compete','weekly')">⚔️ H2H</button>
         <button class="subtab" data-maintab="compete" data-subtab="prizes" onclick="showSub('compete','prizes')">💰 Prizes</button>
       </div>
       <div data-subpanel="overview" data-maintab="compete" id="panel-overview"></div>
-      <div data-subpanel="h2h" data-maintab="compete" id="panel-h2h" style="display:none"></div>
       <div data-subpanel="prizes" data-maintab="compete" id="panel-prizes" style="display:none"></div>
       <div data-subpanel="weekly" data-maintab="compete" id="panel-weekly" style="display:none"></div>
     </div>
