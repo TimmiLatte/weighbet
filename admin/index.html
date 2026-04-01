@@ -285,7 +285,8 @@ window.viewCompDetail = async function(compId) {
           <td>${m.totalPct!=null?m.totalPct.toFixed(2)+'%':'-'}</td>
           <td><div style="display:flex;gap:4px;flex-wrap:wrap">
             <button class="btn-sm btn-warning" data-cid="${compId}" data-uid="${m.uid}" onclick="openWeighInEditorUser(this.dataset.cid,this.dataset.uid)">⚖️ Weigh-ins</button>
-            <button class="btn-sm btn-primary" data-cid="${compId}" data-uid="${m.uid}" data-name="${encodeURIComponent(m.displayName||'')}" onclick="openViewAs(this.dataset.cid,this.dataset.uid,decodeURIComponent(this.dataset.name))">👁 View as</button>
+            <button class="btn-sm btn-primary" data-cid="${compId}" data-uid="${m.uid}" onclick="openViewAs(this.dataset.cid,this.dataset.uid)">🔍 Quick View</button>
+            <button class="btn-sm btn-success" data-cid="${compId}" data-uid="${m.uid}" onclick="openLiveView(this.dataset.cid,this.dataset.uid)">🔴 Live View</button>
             <button class="btn-sm btn-${m.playerType==='free'?'success':'muted'}" data-cid="${compId}" data-uid="${m.uid}" data-type="${m.playerType||'paying'}" onclick="togglePlayerType(this.dataset.cid,this.dataset.uid,this.dataset.type)">
               ${m.playerType==='free'?'→ Paying':'→ Free'}
             </button>
@@ -1127,6 +1128,15 @@ function renderSettings() {
 }
 
 // ── MODAL ─────────────────────────────────────────────────────
+
+// openLiveView: open the real user app in a new tab, rendering as a specific user.
+// The user app detects viewAs + comp params, verifies the viewer is SA,
+// and renders entirely as that user with a dismissible banner at the top.
+window.openLiveView = function(compId, uid) {
+  const url = 'https://timmilatte.github.io/weighbet/?viewAs=' + encodeURIComponent(uid) + '&comp=' + encodeURIComponent(compId);
+  window.open(url, '_blank');
+};
+
 window.closeModal = function(id) { const el=$(id); if(el) el.style.display='none'; };
 
 window.mobileTab = function(tab) {
@@ -1175,19 +1185,24 @@ window.openViewAsSelect = async function(compId) {
     vaMembers = ms.docs.map(d=>({uid:d.id,...d.data()})).sort((a,b)=>(a.displayName||'').localeCompare(b.displayName||''));
     body.innerHTML = `
       <h2 style="font-family:Syne,sans-serif;font-weight:800;font-size:20px;margin-bottom:4px">👁 View as User</h2>
-      <p style="color:var(--muted);margin-bottom:20px">${vaComp.name} — select a competitor to preview their view</p>
+      <p style="color:var(--muted);margin-bottom:6px">${vaComp.name}</p>
+      <div style="display:flex;gap:8px;margin-bottom:16px;padding:10px 14px;background:var(--bg3);border-radius:10px;font-size:12px">
+        <div style="flex:1"><strong style="color:var(--accent)">🔍 Quick View</strong> — data snapshot inside this panel. Fast, no tab switching.</div>
+        <div style="flex:1"><strong style="color:var(--success)">🔴 Live View</strong> — opens the real user app as that person. Full live data, real-time updates.</div>
+      </div>
       <div style="display:grid;gap:6px">
         ${vaMembers.map(m=>`
-          <button onclick="loadViewAs('${compId}','${m.uid}')"
-            style="display:flex;align-items:center;gap:12px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:12px 16px;cursor:pointer;text-align:left;transition:border-color .15s"
-            onmouseover="this.style.borderColor='rgba(232,168,56,0.4)'" onmouseout="this.style.borderColor='var(--border)'">
+          <div style="display:flex;align-items:center;gap:12px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:10px 14px">
             <div style="width:36px;height:36px;border-radius:50%;background:rgba(232,168,56,0.15);color:var(--accent);display:flex;align-items:center;justify-content:center;font-family:Syne,sans-serif;font-weight:800;font-size:14px;flex-shrink:0">${(m.displayName||'?')[0].toUpperCase()}</div>
-            <div style="flex:1">
+            <div style="flex:1;min-width:0">
               <div style="font-weight:600;font-size:14px;color:var(--text)">${m.displayName||'Unknown'}</div>
-              <div style="font-size:12px;color:var(--muted)">${m.playerType==='free'?'Free player':'Paying'} · ${m.role||'competitor'} · ${m.weighInCount||0} weigh-ins</div>
+              <div style="font-size:12px;color:var(--muted)">${m.playerType==='free'?'Free':'Paying'} · ${m.weighInCount||0} weigh-ins</div>
             </div>
-            <span style="color:var(--muted);font-size:18px">→</span>
-          </button>`).join('')}
+            <div style="display:flex;gap:6px;flex-shrink:0">
+              <button class="btn-sm btn-primary" data-cid="${compId}" data-uid="${m.uid}" onclick="loadViewAs(this.dataset.cid,this.dataset.uid)">🔍 Quick</button>
+              <button class="btn-sm btn-success" data-cid="${compId}" data-uid="${m.uid}" onclick="openLiveView(this.dataset.cid,this.dataset.uid)">🔴 Live</button>
+            </div>
+          </div>`).join('')}
       </div>`;
   } catch(e) { body.innerHTML=`<div class="error-msg">${e.message}</div>`; }
 };
@@ -1298,31 +1313,53 @@ window.loadViewAs = async function(compId, uid) {
       </tr>`;
     }
 
-    // ── confirmed earnings ──
-    let totalEarned=0;
+    // ── confirmed earnings — full leaderboard for ALL competitors ──
+    // Built the same way the user app does, so view-as matches exactly what she sees.
+    const earnMap={};
     for(let w=1;w<curWk;w++){
-      const prize=w===weeks?basePerWin:getPrizeForWeek(w); // final week base only
-      vaMatchups.filter(m=>m.week===w&&(m.p1===uid||m.p2===uid)).forEach(m=>{
-        const opp=m.p1===uid?m.p2:m.p1;
-        if(isPaying(uid)){
-          if(opp==='BYE'){ const others=paying.filter(c=>c.uid!==uid).map(c=>weeklyPct(c.uid,w)).filter(v=>v!==null).sort((a,b)=>a-b); const med=others.length?others[Math.floor(others.length/2)]:null; if(didWI(uid,w)&&med!==null&&weeklyPct(uid,w)>med) totalEarned+=prize; }
-          else if(!isPaying(opp)){ if(didWI(uid,w)&&(!didWI(opp,w)||weeklyPct(uid,w)>=weeklyPct(opp,w))) totalEarned+=prize; }
-          else { const myP=weeklyPct(uid,w),opP=weeklyPct(opp,w); if(!didWI(uid,w)) return; if(!didWI(opp,w)){totalEarned+=prize;} else if(myP!==null&&opP!==null){ if(myP===opP) totalEarned+=prize/2; else if(myP>opP) totalEarned+=prize; } }
+      const prize=w===weeks?basePerWin:getPrizeForWeek(w);
+      vaMatchups.filter(m=>m.week===w).forEach(m=>{
+        const p1f=!isPaying(m.p1), p2f=m.p2!=='BYE'&&!isPaying(m.p2);
+        if(p1f&&p2f) return; // free vs free — no prize
+        if(m.p2==='BYE'){
+          const p1pct=weeklyPct(m.p1,w);
+          if(p1pct===null) return;
+          const others=paying.filter(c=>c.uid!==m.p1).map(c=>weeklyPct(c.uid,w)).filter(v=>v!==null).sort((a,b)=>a-b);
+          const med=others.length?others[Math.floor(others.length/2)]:null;
+          if(med!==null&&p1pct>med) earnMap[m.p1]=(earnMap[m.p1]||0)+prize;
+          return;
         }
+        if(p1f!==p2f){
+          const pu=p1f?m.p2:m.p1, fu=p1f?m.p1:m.p2;
+          const pp=weeklyPct(pu,w), fp=weeklyPct(fu,w);
+          if(!didWI(pu,w)) return;
+          if(!didWI(fu,w)||pp>=fp) earnMap[pu]=(earnMap[pu]||0)+prize;
+          return;
+        }
+        // paying vs paying
+        const e1=weeklyPct(m.p1,w), e2=weeklyPct(m.p2,w);
+        if(!didWI(m.p1,w)&&!didWI(m.p2,w)) return;
+        if(!didWI(m.p1,w)){ earnMap[m.p2]=(earnMap[m.p2]||0)+prize; return; }
+        if(!didWI(m.p2,w)){ earnMap[m.p1]=(earnMap[m.p1]||0)+prize; return; }
+        if(e1===e2){ earnMap[m.p1]=(earnMap[m.p1]||0)+prize/2; earnMap[m.p2]=(earnMap[m.p2]||0)+prize/2; }
+        else if(e1>e2){ earnMap[m.p1]=(earnMap[m.p1]||0)+prize; }
+        else { earnMap[m.p2]=(earnMap[m.p2]||0)+prize; }
       });
-      // BL bonus
+      // Weekly BL bonus
       const bests=paying.map(c=>({uid:c.uid,pct:weeklyPct(c.uid,w)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct);
-      if(bests.length>0&&bests[0].uid===uid) totalEarned+=wBL;
+      if(bests.length>0) earnMap[bests[0].uid]=(earnMap[bests[0].uid]||0)+wBL;
     }
+    const totalEarned=earnMap[uid]||0;
+    const earnList=Object.entries(earnMap).map(e=>({uid:e[0],name:nameOf(e[0]),total:e[1]})).sort((a,b)=>b.total-a.total);
 
     // ── weekly pct log ──
     const myWI = userWI(uid);
 
     body.innerHTML = `
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
-        <button onclick="openViewAsSelect('${compId}')" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:13px;padding:0">← Back</button>
+        <button onclick="openViewAsSelect('${compId}')" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:13px;padding:0">← Back to picker</button>
         <div style="width:1px;height:16px;background:var(--border)"></div>
-        <h2 style="font-family:Syne,sans-serif;font-weight:800;font-size:20px">👁 ${me.displayName||'Unknown'}</h2>
+        <h2 style="font-family:Syne,sans-serif;font-weight:800;font-size:20px">🔍 Quick View — ${me.displayName||'Unknown'}</h2>
         <span class="badge ${me.playerType==='free'?'badge-muted':'badge-success'}">${me.playerType==='free'?'Free':'Paying'}</span>
       </div>
       <p style="color:var(--muted);font-size:13px;margin-bottom:24px">${vaComp.name} · Week ${curWk} of ${weeks} · Pool: ${fmtMoney(pool)}</p>
@@ -1330,7 +1367,7 @@ window.loadViewAs = async function(compId, uid) {
       <div class="stat-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:24px">
         <div class="stat-card"><div class="stat-value">${fmtPct(totalPct(uid))}</div><div class="stat-label">Total Lost</div></div>
         <div class="stat-card"><div class="stat-value">${myWI.length}</div><div class="stat-label">Weigh-ins</div></div>
-        <div class="stat-card"><div class="stat-value" style="color:var(--success)">${fmtMoney(totalEarned)}</div><div class="stat-label">Confirmed Earnings</div></div>
+        <div class="stat-card" style="border-color:${totalEarned>0?'rgba(95,212,179,0.3)':''}"><div class="stat-value" style="color:var(--success)">${fmtMoney(totalEarned)}</div><div class="stat-label">Her Earnings</div><div style="font-size:11px;color:var(--muted);margin-top:2px">confirmed so far</div></div>
         <div class="stat-card"><div class="stat-value">${myMatchups.length}</div><div class="stat-label">H2H Matches</div></div>
       </div>
 
@@ -1352,6 +1389,23 @@ window.loadViewAs = async function(compId, uid) {
         <thead><tr><th>Week</th><th>Opponent</th><th>My %</th><th>Opp %</th><th>Result</th><th>Won</th></tr></thead>
         <tbody>${myMatchups.map(m=>h2hRow(m)).join('')}</tbody>
       </table></div>`}
+
+      <div class="section-title">💰 Earnings Leaderboard (what she sees)</div>
+      ${earnList.length===0
+        ? '<p style="color:var(--muted);font-size:13px;margin-bottom:24px">No confirmed earnings yet — matchups may not have been generated, or no weeks are completed.</p>'
+        : `<div style="margin-bottom:24px">
+            <p style="font-size:12px;color:var(--muted);margin-bottom:12px">This is the exact earnings list every user sees on the Prizes tab. The highlighted row is her entry.</p>
+            ${earnList.map((e,i)=>{
+              const isHer=e.uid===uid;
+              const rc=i===0?'#f7d76a':i===1?'#c0c0c0':i===2?'#cd7f32':'var(--muted)';
+              return \`<div style="display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:8px;margin-bottom:4px;background:\${isHer?'rgba(232,168,56,0.08)':'rgba(255,255,255,0.02)'};border:1px solid \${isHer?'rgba(232,168,56,0.3)':'var(--border)'}">
+                <span style="font-family:Syne,sans-serif;font-weight:700;font-size:16px;width:24px;text-align:center;color:\${rc}">\${i+1}</span>
+                <span style="flex:1;font-weight:\${isHer?'600':'400'};font-size:13px;color:\${isHer?'var(--accent)':'var(--text)'}">\${e.name}\${isHer?' ← her':''}</span>
+                <span style="font-family:Syne,sans-serif;font-weight:700;font-size:16px;color:var(--success)">\${fmtMoney(e.total)}</span>
+              </div>\`;
+            }).join('')}
+          </div>`
+      }
 
       <div class="section-title">📊 Weekly Weigh-in Log</div>
       <div class="table-wrap" style="margin-bottom:24px"><table>
