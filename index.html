@@ -1127,7 +1127,7 @@ function renderWeekly() {
       <div id="week-carousel" style="padding-left:calc(50% - 40px);padding-right:calc(50% - 40px)"></div>
     </div>
     <div id="week-carousel-label" style="text-align:center;font-size:13px;color:var(--muted);margin:8px 0 14px"></div>
-    <div id="week-detail"></div>`;
+    <div id="week-detail" style="overflow:hidden"></div>`;
   renderWeekScroller();
 }
 
@@ -1152,25 +1152,31 @@ function renderWeekDetail(w) {
       var typeLabel=r.matchType==='wildcard'?'Wildcard':r.matchType==='free'?'Friendly':'H2H';
       var myWin=r.winner===uid()||(r.tied&&isMe);
       var myLoss=r.winner&&r.winner!==uid()&&isMe;
-      return '<div class="compact-match '+(isMe?'compact-match-me':'')+'">'
-        +'<div class="cm-label">Week '+w+' · '+typeLabel+'</div>'
-        +'<div class="cm-row">'
-          +'<div class="cm-player" style="opacity:'+(p2w&&!r.tied?0.45:1)+'">'
-            +avatar(n1,28)
-            +'<span class="cm-name">'+(p1w||r.tied?'👑 ':'')+n1+'</span>'
-            +'<span class="cm-pct" style="color:'+(p1w?'var(--success)':'var(--muted)');'">'+(r.p1pct!=null?fmtPct(r.p1pct):'—')+'</span>'
-          +'</div>'
-          +'<span class="cm-vs">VS</span>'
-          +'<div class="cm-player cm-player-right" style="opacity:'+(p1w&&!r.tied?0.45:1)+'">'
-            +'<span class="cm-pct" style="color:'+(p2w?'var(--success)':'var(--muted)')+';">'+(m.p2==='BYE'?'—':r.p2pct!=null?fmtPct(r.p2pct):'—')+'</span>'
-            +'<span class="cm-name">'+(p2w||r.tied?'👑 ':'')+n2+'</span>'
-            +(m.p2==='BYE'?'<div class="avatar-bye" style="width:28px;height:28px;font-size:9px">BYE</div>':avatar(n2,28))
-          +'</div>'
-        +'</div>'
-        +'<div class="cm-note '+(myWin?'cm-note-win':myLoss?'cm-note-loss':'')+'">'
-          +r.note+(r.prize>0&&r.winner?' · '+fmtMoney(r.prize):'')
-        +'</div>'
-      +'</div>';
+      var p1col=p1w?'var(--success)':'var(--muted)';
+      var p2col=p2w?'var(--success)':'var(--muted)';
+      var p1op=p2w&&!r.tied?'0.45':'1';
+      var p2op=p1w&&!r.tied?'0.45':'1';
+      var noteClass='cm-note'+(myWin?' cm-note-win':myLoss?' cm-note-loss':'');
+      var byeDiv='<div class="avatar-bye" style="width:28px;height:28px;font-size:9px">BYE</div>';
+      var html='';
+      html+='<div class="compact-match'+(isMe?' compact-match-me':'')+'">';
+        html+='<div class="cm-label">Week '+w+' · '+typeLabel+'</div>';
+        html+='<div class="cm-row">';
+          html+='<div class="cm-player" style="opacity:'+p1op+'">';
+            html+=avatar(n1,28);
+            html+='<span class="cm-name">'+(p1w||r.tied?'&#x1F451; ':'')+n1+'</span>';
+            html+='<span class="cm-pct" style="color:'+p1col+'">'+(r.p1pct!=null?fmtPct(r.p1pct):'&mdash;')+'</span>';
+          html+='</div>';
+          html+='<span class="cm-vs">VS</span>';
+          html+='<div class="cm-player cm-player-right" style="opacity:'+p2op+'">';
+            html+='<span class="cm-pct" style="color:'+p2col+'">'+(m.p2==='BYE'?'&mdash;':r.p2pct!=null?fmtPct(r.p2pct):'&mdash;')+'</span>';
+            html+='<span class="cm-name">'+(p2w||r.tied?'&#x1F451; ':'')+n2+'</span>';
+            html+=(m.p2==='BYE'?byeDiv:avatar(n2,28));
+          html+='</div>';
+        html+='</div>';
+        html+='<div class="'+noteClass+'">'+r.note+(r.prize>0&&r.winner?' · '+fmtMoney(r.prize):'')+'</div>';
+      html+='</div>';
+      return html;
     }).join('');
   }
 
@@ -1269,12 +1275,13 @@ function renderCombinedLb(earnList, lbStats, sortBy, myUid) {
   return sorted.map((r,i)=>{
     const isMe=r.uid===myUid;
     const rc=i===0?'#f7d76a':i===1?'#c0c0c0':i===2?'#cd7f32':'var(--muted)';
+    const isFreeP=lbStats.find(c=>c.uid===r.uid)?.free||false;
     return `<div class="earn-row ${isMe?'earn-me':''}">
       <span style="font-weight:700;font-size:16px;width:24px;text-align:center;color:${rc}">${i+1}</span>
       ${avatar(nameFor(r.uid),32)}
-      <span style="flex:1;font-weight:500;font-size:13px">${nameFor(r.uid)}${isMe?' <span class="tag">you</span>':''}</span>
+      <span style="flex:1;font-weight:500;font-size:13px">${nameFor(r.uid)}${isMe?' <span class="tag">you</span>':''}${isFreeP?' <span class="tag" style="background:rgba(107,107,128,0.15);color:var(--muted)">free</span>':''}</span>
       <span style="text-align:right">
-        <div style="font-family:Syne,sans-serif;font-weight:800;font-size:16px;color:var(--accent3)">${fmtMoney(r.earn)}</div>
+        ${!isFreeP?`<div style="font-family:Syne,sans-serif;font-weight:800;font-size:16px;color:var(--accent3)">${fmtMoney(r.earn)}</div>`:''}
         ${r.pct!=null?`<div style="font-size:11px;color:var(--accent2)">${fmtPct(r.pct)}</div>`:''}
       </span>
     </div>`;
@@ -1308,17 +1315,20 @@ function renderPrizes() {
   const earnMap={};
   const finalPrize=getFinalWeekPrize();
   for(let w=1;w<curWk;w++) {
-    const prize=w===weeks?finalPrize:getWeeklyH2HPrize(w);
     getAllH2HResults(w).forEach(r=>{
+      // r.prize is already 0 for free-player wins, free-vs-free, and unclaimed slots
       if(r.tied) { if(r.prize1>0) earnMap[r.p1]=(earnMap[r.p1]||0)+r.prize1; if(r.prize2>0) earnMap[r.p2]=(earnMap[r.p2]||0)+r.prize2; }
-      else if(r.winner&&prize>0) earnMap[r.winner]=(earnMap[r.winner]||0)+prize;
+      else if(r.winner&&r.prize>0) earnMap[r.winner]=(earnMap[r.winner]||0)+r.prize;
     });
+    // Weekly BL bonus — paying members only
     paying.map(c=>({uid:c.uid,pct:weeklyPctLost(c.uid,w)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct).slice(0,1).forEach(c=>{ earnMap[c.uid]=(earnMap[c.uid]||0)+wBL; });
   }
-  const earnList=Object.entries(earnMap).map(([id,total])=>({uid:id,total})).sort((a,b)=>b.total-a.total);
+  // Filter out free players — they can't earn prize money
+  const earnList=Object.entries(earnMap).map(([id,total])=>({uid:id,total})).filter(e=>!isFree(e.uid)).sort((a,b)=>b.total-a.total);
 
   // Final leaderboard by totalPct for BL prizes
-  const lbStats=paying.map(c=>({uid:c.uid,name:c.displayName,pct:totalPctLost(c.uid)})).filter(c=>c.pct!=null).sort((a,b)=>b.pct-a.pct);
+  // All competitors appear in % lost standings, free or paying
+  const lbStats=competitors.map(c=>({uid:c.uid,name:c.displayName,pct:totalPctLost(c.uid),free:c.playerType==='free'})).filter(c=>c.pct!=null).sort((a,b)=>b.pct-a.pct);
 
   el.innerHTML=`
     <div class="prize-pill pp-gold">
@@ -1366,15 +1376,17 @@ function renderJourney() {
   let myEarnings=0;
   if(matchupsLoaded) {
     const weeks=currentComp?.weeks||8, pool=getPrizePool(), wBL=pool*0.05/weeks;
-    const finalPrize=getFinalWeekPrize();
     for(let w=1;w<curWk;w++) {
-      const prize=w===weeks?finalPrize:getWeeklyH2HPrize(w);
       getAllH2HResults(w).forEach(r=>{
+        // Use r.prize directly — already 0 for free player wins
         if(r.tied){ if(r.p1===uid()&&r.prize1>0) myEarnings+=r.prize1; if(r.p2===uid()&&r.prize2>0) myEarnings+=r.prize2; }
-        else if(r.winner===uid()&&prize>0) myEarnings+=prize;
+        else if(r.winner===uid()&&r.prize>0) myEarnings+=r.prize;
       });
-      const bl=payingMembers().map(c=>({uid:c.uid,pct:weeklyPctLost(c.uid,w)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct);
-      if(bl.length>0&&bl[0].uid===uid()) myEarnings+=wBL;
+      // Weekly BL bonus — only if current user is paying
+      if(!isFree(uid())) {
+        const bl=payingMembers().map(c=>({uid:c.uid,pct:weeklyPctLost(c.uid,w)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct);
+        if(bl.length>0&&bl[0].uid===uid()) myEarnings+=wBL;
+      }
     }
   }
   let h2hWins=0;
@@ -2491,17 +2503,17 @@ select.input{cursor:pointer}
 .week-carousel-item:hover:not(.active){color:var(--text)}
 
 /* Compact match rows */
-.compact-match{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:10px 14px;margin-bottom:8px}
+.compact-match{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:10px 14px;margin-bottom:8px;overflow:hidden;display:block;width:100%;box-sizing:border-box}
 .compact-match-me{border-color:rgba(124,106,247,0.35);background:rgba(124,106,247,0.04)}
-.cm-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);margin-bottom:8px}
-.cm-row{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px}
-.cm-player{display:flex;align-items:center;gap:6px;min-width:0}
+.cm-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);margin-bottom:8px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cm-row{display:grid;grid-template-columns:1fr 28px 1fr;align-items:center;gap:4px;width:100%;box-sizing:border-box}
+.cm-player{display:flex;align-items:center;gap:5px;min-width:0;overflow:hidden}
 .cm-player-right{flex-direction:row-reverse}
-.cm-name{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.cm-name{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
 .cm-player-right .cm-name{text-align:right}
-.cm-pct{font-size:13px;font-weight:700;flex-shrink:0}
+.cm-pct{font-size:12px;font-weight:700;flex-shrink:0;white-space:nowrap}
 .cm-vs{font-size:10px;font-weight:800;color:var(--muted);text-align:center;flex-shrink:0}
-.cm-note{font-size:11px;color:var(--muted);margin-top:6px;padding-top:6px;border-top:1px solid var(--border);text-align:center}
+.cm-note{font-size:11px;color:var(--muted);margin-top:6px;padding-top:6px;border-top:1px solid var(--border);text-align:center;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cm-note-win{color:var(--success)}
 .cm-note-loss{color:var(--danger)}
 
