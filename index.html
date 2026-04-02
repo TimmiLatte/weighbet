@@ -7,7 +7,2739 @@
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script type="module">
 import { initializeApp }                                                       from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getAuth, GoogleAuthProvider, onAuthStateChanged,<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>WeighBet</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script type="module">
+import { initializeApp }                                                       from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, GoogleAuthProvider, onAuthStateChanged,
+         signInWithEmailAndPassword, createUserWithEmailAndPassword,
+         signOut, sendPasswordResetEmail, updateProfile,
+         confirmPasswordReset, verifyPasswordResetCode }                        from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { getFirestore, doc, setDoc, getDoc, getDocs, addDoc, updateDoc,
+         deleteDoc, collection, query, where, orderBy, onSnapshot,
+         serverTimestamp, writeBatch }                                           from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getStorage, ref, uploadBytes, getDownloadURL }                        from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+
+// ─── FIREBASE ────────────────────────────────────────────────────────────────
+const firebaseConfig = {
+  apiKey:            "AIzaSyB2WKhh1ezrPHSNoEPQb3POZJEccn2UmV0",
+  authDomain:        "weighbet.firebaseapp.com",
+  projectId:         "weighbet",
+  storageBucket:     "weighbet.firebasestorage.app",
+  messagingSenderId: "1090791593789",
+  appId:             "1:1090791593789:web:911672c0d7a44e3e98d754"
+};
+const fbApp  = initializeApp(firebaseConfig);
+const auth   = getAuth(fbApp);
+const db     = getFirestore(fbApp);
+const store  = getStorage(fbApp);
+const gp     = new GoogleAuthProvider();
+const APP_VERSION = '2.0.0';
+
+// ─── STATE ───────────────────────────────────────────────────────────────────
+// Auth
+let currentUser    = null;
+let userProfile    = null;
+
+// Competition
+let currentCompId  = null;
+let currentComp    = null;
+let compMembership = null;   // member doc for currentUser in currentComp
+let competitors    = [];     // all member docs for currentComp
+let allWeighIns    = [];     // all weigh-in docs for currentComp
+let matchups       = [];     // all matchup docs for currentComp
+let matchupsLoaded = false;  // true once matchups snapshot has fired
+
+// Personal tracker
+let personalWeighIns = [];
+let trackerGoal      = null;
+
+// Social
+let friends        = [];
+let friendRequests = [];
+let conversations  = [];
+let groupChats     = [];
+let feedPosts      = [];
+let chatMessages   = [];
+
+// My competitions list
+let myCompetitions = [];
+
+// Listeners
+let unsubs = [];
+
+// UI state
+let currentMatchupWeek = 1;
+let currentChatTab     = 'general';
+let dashChart          = null;
+let progressChart      = null;
+let compareUid         = null;
+let activeDMId         = null;
+let personalPeriod     = '3m';   // progress chart period: 7d|30d|3m|6m|1y|all
+let selectedWeek       = null;   // week scroller selected week
+let progressMode       = 'personal'; // personal|compare
+let histPage           = 0;      // weigh-in history pagination
+let activeGroupId      = null;
+let compChartMode      = 'top5';
+let compCompareUid     = null;
+
+// Ghost mode — set when SA opens app via ?viewAs=UID&comp=COMPID from admin portal
+let ghostUid    = null;   // UID being viewed as
+let ghostCompId = null;   // competition context
+
+// Role helpers — admin = competition admin or SA. SA = superAdmin role.
+// Views are IDENTICAL for all roles. Role only gates Preferences admin cards.
+const isAdmin    = () => compMembership?.role === 'admin' || userProfile?.role === 'superAdmin' || userProfile?.role === 'owner';
+const isSA       = () => userProfile?.role === 'superAdmin' || userProfile?.role === 'owner';
+const uid        = () => ghostUid || currentUser?.uid;  // ghost-aware
+const realUid    = () => currentUser?.uid;                // always the real logged-in user
+
+// DOM helper
+const $  = id => document.getElementById(id);
+window.$ = $;
+
+// ─── DATE / WEEK UTILS ───────────────────────────────────────────────────────
+function ymd(d)      { return d.toISOString().slice(0,10); }
+function weekStart(w) {
+  if(!currentComp?.startDate) return null;
+  const s = new Date(currentComp.startDate+'T00:00:00');
+  s.setDate(s.getDate()+(w-1)*7); return s;
+}
+function weekEnd(w) {
+  const s = weekStart(w); if(!s) return null;
+  const e = new Date(s); e.setDate(e.getDate()+6); return e;
+}
+function dateToWeek(dateStr) {
+  if(!currentComp?.startDate) return null;
+  const start = new Date(currentComp.startDate+'T00:00:00');
+  const d     = new Date(dateStr+'T00:00:00');
+  const diff  = Math.floor((d-start)/(7*24*60*60*1000));
+  if(diff < 0 || diff >= (currentComp.weeks||8)) return null;
+  return diff+1;
+}
+function getCurrentWeek() {
+  if(!currentComp?.startDate) return 1;
+  const start = new Date(currentComp.startDate+'T00:00:00');
+  const diff  = Math.floor((new Date()-start)/(7*24*60*60*1000))+1;
+  return Math.max(1, Math.min(diff, currentComp.weeks||8));
+}
+function isCompOver() {
+  if(!currentComp?.startDate) return false;
+  const start = new Date(currentComp.startDate+'T00:00:00');
+  return Math.floor((new Date()-start)/(7*24*60*60*1000))+1 > (currentComp.weeks||8);
+}
+function hasStarted() {
+  if(!currentComp?.startDate) return false;
+  return new Date() >= new Date(currentComp.startDate+'T00:00:00');
+}
+
+// ─── PRIZE POOL HELPERS ──────────────────────────────────────────────────────
+function getPrizePool()      { return payingMembers().length * (currentComp?.buyin||0); }
+function payingMembers()     { return competitors.filter(c=>c.playerType!=='free'); }
+function freeMembers()       { return competitors.filter(c=>c.playerType==='free'); }
+function isFree(memberId)    { return competitors.find(c=>c.uid===memberId)?.playerType==='free'; }
+
+// ─── WEIGH-IN DATA ACCESS ────────────────────────────────────────────────────
+function weighInsFor(memberId) {
+  return allWeighIns.filter(w=>w.userId===memberId).sort((a,b)=>a.date.localeCompare(b.date));
+}
+function lastWIForWeek(memberId, w) {
+  const ws=weekStart(w), we=weekEnd(w); if(!ws) return null;
+  const wsS=ymd(ws), weS=ymd(we);
+  const es=weighInsFor(memberId).filter(e=>e.date>=wsS&&e.date<=weS);
+  return es.length ? es[es.length-1] : null;
+}
+function startWeight(memberId) { const wi=weighInsFor(memberId); return wi.length?wi[0]:null; }
+function totalPctLost(memberId) {
+  const wi=weighInsFor(memberId); if(wi.length<2) return null;
+  return (wi[0].weight-wi[wi.length-1].weight)/wi[0].weight*100;
+}
+function weeklyPctLost(memberId, w) {
+  const end=lastWIForWeek(memberId,w); if(!end) return null;
+  let prev=null;
+  for(let pw=w-1;pw>=1;pw--) { const p=lastWIForWeek(memberId,pw); if(p){prev=p.weight;break;} }
+  if(prev===null) { const sw=startWeight(memberId); prev=sw?sw.weight:end.weight; }
+  return prev===0?0:(prev-end.weight)/prev*100;
+}
+function didWeighIn(memberId,w) { return lastWIForWeek(memberId,w)!==null; }
+function nameFor(memberId) {
+  if(memberId==='BYE') return 'BYE';
+  return competitors.find(c=>c.uid===memberId)?.displayName || 'Unknown';
+}
+
+// ─── PRIZE MATH ─────────────────────────────────────────────────────────────
+// Carried over exactly from validated v1 — do not change without re-validating.
+function getWeeklyH2HPrize(w) {
+  const pool=getPrizePool(), weeks=currentComp?.weeks||1;
+  const paying=payingMembers(), wpp=Math.max(1,Math.floor(paying.length/2));
+  const basePerWin=wpp>0?(pool*0.35/weeks)/wpp:(pool*0.35/weeks);
+  if(w===weeks) return basePerWin;
+
+  let pot=0;
+  for(let pw=1;pw<w;pw++) {
+    const weeksLeft=weeks-pw;
+    const extra=weeksLeft>0?(pot/weeksLeft)/wpp:0;
+    const prize=basePerWin+extra;
+    if(weeksLeft>0) pot-=pot/weeksLeft;
+    matchups.filter(m=>m.week===pw).forEach(m=>{
+      const p1f=isFree(m.p1), p2f=m.p2!=='BYE'&&isFree(m.p2);
+      if(p1f&&p2f) return;
+      if(m.p2==='BYE') {
+        const p=weeklyPctLost(m.p1,pw);
+        if(p===null){pot+=prize;return;}
+        const others=paying.filter(c=>c.uid!==m.p1).map(c=>weeklyPctLost(c.uid,pw)).filter(v=>v!==null).sort((a,b)=>a-b);
+        const med=others.length?others[Math.floor(others.length/2)]:null;
+        if(med!==null&&p<=med) pot+=prize;
+        return;
+      }
+      if(p1f!==p2f) {
+        const fu=p1f?m.p1:m.p2, pu=p1f?m.p2:m.p1;
+        const fIn=didWeighIn(fu,pw), pIn=didWeighIn(pu,pw);
+        if(!fIn&&!pIn){pot+=prize;return;}
+        if(!pIn) return;
+        const fp=weeklyPctLost(fu,pw), pp=weeklyPctLost(pu,pw);
+        if(fp!==null&&pp!==null&&fp>=pp) pot+=prize;
+        return;
+      }
+      if(!didWeighIn(m.p1,pw)&&!didWeighIn(m.p2,pw)) pot+=prize;
+    });
+  }
+  const weeksLeft=weeks-w;
+  return basePerWin+(pot/(weeksLeft+1))/wpp;
+}
+
+function getAccumulatedPot() {
+  const pool=getPrizePool(), weeks=currentComp?.weeks||1;
+  const paying=payingMembers(), wpp=Math.max(1,Math.floor(paying.length/2));
+  const basePerWin=wpp>0?(pool*0.35/weeks)/wpp:(pool*0.35/weeks);
+  let pot=0;
+  for(let pw=1;pw<weeks;pw++) {
+    const weeksLeft=weeks-pw;
+    const extra=weeksLeft>0?(pot/weeksLeft)/wpp:0;
+    const prize=basePerWin+extra;
+    if(weeksLeft>0) pot-=pot/weeksLeft;
+    matchups.filter(m=>m.week===pw).forEach(m=>{
+      const p1f=isFree(m.p1), p2f=m.p2!=='BYE'&&isFree(m.p2);
+      if(p1f&&p2f) return;
+      if(m.p2==='BYE') {
+        const p=weeklyPctLost(m.p1,pw); if(p===null){pot+=prize;return;}
+        const others=payingMembers().filter(c=>c.uid!==m.p1).map(c=>weeklyPctLost(c.uid,pw)).filter(v=>v!==null).sort((a,b)=>a-b);
+        const med=others.length?others[Math.floor(others.length/2)]:null;
+        if(med!==null&&p<=med) pot+=prize; return;
+      }
+      if(p1f!==p2f) {
+        const fu=p1f?m.p1:m.p2, pu=p1f?m.p2:m.p1;
+        if(!didWeighIn(fu,pw)&&!didWeighIn(pu,pw)){pot+=prize;return;}
+        if(!didWeighIn(pu,pw)) return;
+        const fp=weeklyPctLost(fu,pw), pp=weeklyPctLost(pu,pw);
+        if(fp!==null&&pp!==null&&fp>=pp) pot+=prize; return;
+      }
+      if(!didWeighIn(m.p1,pw)&&!didWeighIn(m.p2,pw)) pot+=prize;
+    });
+  }
+  return pot;
+}
+
+function getFinalWeekPrize() {
+  const weeks=currentComp?.weeks||8, pool=getPrizePool();
+  const wpp=Math.max(1,Math.floor(payingMembers().length/2));
+  const basePerWin=wpp>0?(pool*0.35/weeks)/wpp:(pool*0.35/weeks);
+  const results=getAllH2HResults(weeks);
+  let actual=0;
+  results.forEach(r=>{
+    if(r.matchType==='free') return;
+    if(r.winner&&!(isFree(r.winner)&&r.matchType==='wildcard')) actual++;
+    if(r.tied) actual++;
+  });
+  if(actual===0) return basePerWin;
+  return (wpp*basePerWin)/actual;
+}
+
+function getFinalWeekBonus() {
+  const weeks=currentComp?.weeks||8, pool=getPrizePool(), wBL=pool*0.05/weeks;
+  let bonus=getAccumulatedPot();
+  if(payingMembers().filter(c=>didWeighIn(c.uid,weeks)).length===0) bonus+=wBL;
+  return bonus;
+}
+
+function h2hResult(m, w) {
+  const weeks=currentComp?.weeks||1, prize=getWeeklyH2HPrize(w);
+  const p1Free=isFree(m.p1), p2Free=m.p2!=='BYE'&&isFree(m.p2);
+  const prizeAtStake=(!p1Free&&!p2Free&&m.p2!=='BYE')?prize:0;
+
+  if(m.p2==='BYE') {
+    const p1pct=weeklyPctLost(m.p1,w);
+    const others=payingMembers().filter(c=>c.uid!==m.p1).map(c=>weeklyPctLost(c.uid,w)).filter(v=>v!==null).sort((a,b)=>a-b);
+    const median=others.length?others[Math.floor(others.length/2)]:null;
+    let winner=null, note='BYE — must beat more than half of competitors';
+    if(p1pct===null) note='No weigh-in — prize back to pool';
+    else if(median!==null) {
+      winner=p1pct>median?m.p1:null;
+      note=p1pct>median?'Beat median ('+median.toFixed(2)+'%) — wins':'Did not beat median ('+median.toFixed(2)+'%) — prize back to pool';
+    }
+    return {week:w,p1:m.p1,p2:'BYE',winner,p1pct,p2pct:null,note,prize:winner?prize:0,prizeAtStake:prize,matchType:'paying'};
+  }
+
+  if(p1Free!==p2Free) {
+    const fu=p1Free?m.p1:m.p2, pu=p1Free?m.p2:m.p1;
+    const fp=weeklyPctLost(fu,w), pp=weeklyPctLost(pu,w);
+    const fIn=didWeighIn(fu,w), pIn=didWeighIn(pu,w);
+    let winner=null,note='',prizeWon=0;
+    if(!fIn&&!pIn)       note='Both no-show — prize back to pool';
+    else if(!fIn)       {winner=pu;prizeWon=prize;note=nameFor(fu)+' no-show — '+nameFor(pu)+' wins';}
+    else if(!pIn)        note=nameFor(pu)+' no-show — '+nameFor(fu)+' wins (no prize, free player)';
+    else if(fp===pp)    {winner=pu;prizeWon=prize;note='Tie — '+nameFor(pu)+' wins prize (paying player)';}
+    else if(fp>pp)       note=nameFor(fu)+' wins (free player — prize back to pool)';
+    else                {winner=pu;prizeWon=prize;note=nameFor(pu)+' wins';}
+    return {week:w,p1:m.p1,p2:m.p2,winner,p1pct:weeklyPctLost(m.p1,w),p2pct:weeklyPctLost(m.p2,w),note,prize:prizeWon,prizeAtStake:prize,matchType:'wildcard'};
+  }
+
+  if(p1Free&&p2Free) {
+    const e1=weeklyPctLost(m.p1,w),e2=weeklyPctLost(m.p2,w);
+    const in1=didWeighIn(m.p1,w),in2=didWeighIn(m.p2,w);
+    let winnerF=null,noteF='Friendly match — no prize';
+    if(!in1&&!in2)  noteF='Both no-show';
+    else if(!in1)  {winnerF=m.p2;noteF=nameFor(m.p1)+' no-show — '+nameFor(m.p2)+' wins (bragging rights)';}
+    else if(!in2)  {winnerF=m.p1;noteF=nameFor(m.p2)+' no-show — '+nameFor(m.p1)+' wins (bragging rights)';}
+    else if(e1===e2) noteF='Tie — bragging rights shared';
+    else           {winnerF=e1>e2?m.p1:m.p2;noteF=nameFor(winnerF)+' wins (bragging rights)';}
+    return {week:w,p1:m.p1,p2:m.p2,winner:winnerF,p1pct:e1,p2pct:e2,note:noteF,prize:0,prizeAtStake:0,matchType:'free'};
+  }
+
+  const e1=weeklyPctLost(m.p1,w),e2=weeklyPctLost(m.p2,w);
+  const in1=didWeighIn(m.p1,w),in2=didWeighIn(m.p2,w);
+  let winner=null,note='',prizeWon=0;
+  if(!in1&&!in2)    note='Both no-show — prize back to pool';
+  else if(!in1)    {winner=m.p2;prizeWon=prize;note=nameFor(m.p1)+' no-show — '+nameFor(m.p2)+' wins by default';}
+  else if(!in2)    {winner=m.p1;prizeWon=prize;note=nameFor(m.p2)+' no-show — '+nameFor(m.p1)+' wins by default';}
+  else if(e1===e2)  return {week:w,p1:m.p1,p2:m.p2,winner:null,tied:true,p1pct:e1,p2pct:e2,note:'Exact tie — prize split equally',prize:prize/2,prize1:prize/2,prize2:prize/2,prizeAtStake:prize,matchType:'paying'};
+  else             {winner=e1>e2?m.p1:m.p2;prizeWon=prize;note=nameFor(winner)+' wins';}
+  return {week:w,p1:m.p1,p2:m.p2,winner,tied:false,p1pct:e1,p2pct:e2,note,prize:prizeWon,prizeAtStake:prize,matchType:'paying'};
+}
+function getAllH2HResults(w) { return matchups.filter(m=>m.week===w).map(m=>h2hResult(m,w)); }
+
+// ─── MATCHUP GENERATION ──────────────────────────────────────────────────────
+function buildRoundRobin() {
+  const paying=payingMembers().map(c=>c.uid);
+  const free=freeMembers().map(c=>c.uid);
+  const all=[...paying,...free];
+  const weeks=currentComp?.weeks||8;
+  const list=all.length%2===0?all:[...all,'BYE'];
+  const n=list.length, rounds=[];
+  for(let r=0;r<n-1;r++) {
+    const pairs=[];
+    for(let i=0;i<n/2;i++) pairs.push([list[i],list[n-1-i]]);
+    rounds.push(pairs);
+    list.splice(1,0,list.pop());
+  }
+  const schedule=[];
+  for(let w=1;w<=weeks;w++) {
+    const round=rounds[(w-1)%(n-1)];
+    round.forEach(([a,b])=>{ if(a!=='BYE'&&b!=='BYE') schedule.push({week:w,p1:a,p2:b}); else if(a!=='BYE') schedule.push({week:w,p1:a,p2:'BYE'}); else if(b!=='BYE') schedule.push({week:w,p1:b,p2:'BYE'}); });
+  }
+  return schedule;
+}
+
+async function autoGenerateMatchups() {
+  // Called on load if: start date has arrived, competition is active, matchups are empty
+  if(!currentCompId||!currentComp?.startDate||!hasStarted()||isCompOver()) return;
+  if(matchups.length>0) return; // already generated
+  // Check Firestore directly (snapshot may be empty but let's confirm)
+  const snap=await getDocs(collection(db,'competitions',currentCompId,'matchups'));
+  if(!snap.empty) return; // already in Firestore, snapshot will catch up
+  const schedule=buildRoundRobin();
+  if(schedule.length===0) return;
+  const batch=writeBatch(db);
+  schedule.forEach(m=>batch.set(doc(collection(db,'competitions',currentCompId,'matchups')),{...m,createdAt:serverTimestamp(),autoGenerated:true}));
+  await batch.commit();
+  // Snapshot listener will fire and update matchups state automatically
+}
+
+// ─── FORMAT HELPERS ──────────────────────────────────────────────────────────
+function fmtPct(v)    { if(v==null||isNaN(v)) return '—'; return (v>=0?'−':'+')+Math.abs(v).toFixed(2)+'%'; }
+function fmtMoney(v)  { return '$'+Number(v||0).toFixed(2); }
+function fmtDate(s)   { if(!s) return '—'; try { return new Date(s+'T00:00:00').toLocaleDateString('en-NZ',{day:'numeric',month:'short',year:'numeric'}); } catch(e){ return s; } }
+
+const AVATAR_COLORS=['#7c6af7','#5fd4b3','#f7b26a','#e05252','#f7d76a','#a78bfa','#34d399','#fb923c','#f472b6','#60a5fa'];
+function avatarColor(name) { let h=0; for(let i=0;i<(name||'').length;i++) h=(h*31+name.charCodeAt(i))&0xffffffff; return AVATAR_COLORS[Math.abs(h)%AVATAR_COLORS.length]; }
+function avatar(name, size=36) {
+  const initials=(name||'?').split(' ').map(w=>w[0]).join('').substring(0,2).toUpperCase();
+  const c=avatarColor(name);
+  return `<div style="width:${size}px;height:${size}px;border-radius:50%;background:${c}22;color:${c};display:flex;align-items:center;justify-content:center;font-family:Syne,sans-serif;font-weight:800;font-size:${Math.round(size*0.38)}px;flex-shrink:0;line-height:1">${initials}</div>`;
+}
+
+// ─── ALERTS ──────────────────────────────────────────────────────────────────
+function toast(msg, type='success') {
+  let el=$('toast');
+  if(!el) { el=document.createElement('div'); el.id='toast'; document.body.appendChild(el); }
+  el.textContent=msg;
+  el.className='toast toast-'+type;
+  el.style.display='block';
+  clearTimeout(el._t);
+  el._t=setTimeout(()=>el.style.display='none',3500);
+}
+
+// ─── SCREENS ─────────────────────────────────────────────────────────────────
+const SCREENS=['screen-auth','screen-reset','screen-select','screen-app','screen-super-admin'];
+function showScreen(id) {
+  SCREENS.forEach(s=>{ const el=$(s); if(el) el.style.display=s===id?(s==='screen-app'?'grid':'block'):'none'; });
+}
+
+
+// ─── BODY COMPOSITION & GOAL HELPERS ────────────────────────────────────────
+function calcBMI(weightKg, heightCm) {
+  if(!weightKg || !heightCm) return null;
+  const hm = heightCm / 100;
+  return weightKg / (hm * hm);
+}
+function bmiCategory(bmi) {
+  if(bmi == null) return null;
+  if(bmi < 16)   return {label:'Severely Underweight', color:'#e05252'};
+  if(bmi < 18.5) return {label:'Underweight',          color:'#f7b26a'};
+  if(bmi < 25)   return {label:'Healthy Weight',       color:'#5fd4b3'};
+  if(bmi < 30)   return {label:'Overweight',           color:'#f7b26a'};
+  if(bmi < 35)   return {label:'Obese (Class I)',      color:'#e05252'};
+  return               {label:'Obese (Class II+)',     color:'#e05252'};
+}
+function calcHealthyWeightRange(heightCm) {
+  if(!heightCm) return null;
+  const hm = heightCm / 100;
+  return {min:+(18.5*hm*hm).toFixed(1), max:+(24.9*hm*hm).toFixed(1)};
+}
+function calcBodyFatNavy(weightKg, heightCm, waistCm, neckCm, hipCm, gender) {
+  if(!weightKg||!heightCm||!waistCm||!neckCm) return null;
+  if(gender==='female'&&!hipCm) return null;
+  let bf;
+  if(gender==='female') bf = 163.205*Math.log10(waistCm+hipCm-neckCm) - 97.684*Math.log10(heightCm) - 78.387;
+  else                  bf = 86.010*Math.log10(waistCm-neckCm) - 70.041*Math.log10(heightCm) + 36.76;
+  return Math.max(0, Math.min(60, +bf.toFixed(1)));
+}
+function calcProjectedDate(wi, targetWeight) {
+  if(!wi||wi.length<2||!targetWeight) return null;
+  const latest = wi[wi.length-1].weight;
+  if(latest <= targetWeight) return 'Already reached!';
+  const start = new Date(wi[0].date+'T00:00:00');
+  const xs = wi.map(e=>Math.round((new Date(e.date+'T00:00:00')-start)/(24*60*60*1000)));
+  const ys = wi.map(e=>e.weight);
+  const n=xs.length, sX=xs.reduce((a,b)=>a+b,0), sY=ys.reduce((a,b)=>a+b,0);
+  const sXY=xs.reduce((a,x,i)=>a+x*ys[i],0), sX2=xs.reduce((a,x)=>a+x*x,0);
+  const denom=n*sX2-sX*sX; if(denom===0) return null;
+  const slope=(n*sXY-sX*sY)/denom;
+  if(slope>=0) return 'Weight not trending down';
+  const intercept=(sY-slope*sX)/n;
+  const days=(targetWeight-intercept)/slope;
+  if(days<0||days>3650) return null;
+  const proj=new Date(start); proj.setDate(proj.getDate()+Math.round(days));
+  return fmtDate(proj.toISOString().slice(0,10));
+}
+function calcWeeklyRate(wi) {
+  if(!wi||wi.length<2) return null;
+  const days=Math.max(1,(new Date(wi[wi.length-1].date+'T00:00:00')-new Date(wi[0].date+'T00:00:00'))/(24*60*60*1000));
+  return (wi[0].weight-wi[wi.length-1].weight)/(days/7);
+}
+function downsampleWeekly(wi) {
+  if(wi.length<=60) return wi;
+  const buckets={}, order=[];
+  wi.forEach(e=>{
+    const d=new Date(e.date+'T00:00:00');
+    const jan1=new Date(d.getFullYear(),0,1);
+    const wk=Math.ceil(((d-jan1)/86400000+jan1.getDay()+1)/7);
+    const key=d.getFullYear()+'-W'+String(wk).padStart(2,'0');
+    if(!buckets[key]){buckets[key]=[];order.push(key);}
+    buckets[key].push(e);
+  });
+  return order.map(k=>{
+    const es=buckets[k], avg=es.reduce((s,e)=>s+e.weight,0)/es.length;
+    return {date:es[Math.floor(es.length/2)].date, weight:+avg.toFixed(1), unit:es[0].unit};
+  });
+}
+
+// ─── ACHIEVEMENTS ────────────────────────────────────────────────────────────
+function calcAchievements(memberId) {
+  const wi=weighInsFor(memberId); if(!wi.length) return [];
+  const sw=wi[0], badges=[], unit=sw.unit||'kg';
+  const kgLost=sw.weight-wi[wi.length-1].weight, totPct=totalPctLost(memberId);
+  const milestones=unit==='lbs'
+    ?[{kg:2.2,label:'First 2 lbs lost',icon:'🌱'},{kg:5.5,label:'5 lbs down',icon:'💪'},{kg:11,label:'10 lbs milestone',icon:'🔥'},{kg:22,label:'20 lbs champion',icon:'🏆'}]
+    :[{kg:1,label:'First kg lost',icon:'🌱'},{kg:2.5,label:'2.5 kg down',icon:'💪'},{kg:5,label:'5 kg milestone',icon:'🔥'},{kg:10,label:'10 kg champion',icon:'🏆'}];
+  milestones.forEach(m=>{if(kgLost>=m.kg)badges.push({icon:m.icon,label:m.label,desc:'Weight loss milestone',color:'#5fd4b3'});});
+  if(totPct>=1)  badges.push({icon:'📉',label:'1% down',desc:'Lost 1% of body weight',color:'#7c6af7'});
+  if(totPct>=2.5)badges.push({icon:'📉',label:'2.5% lost',desc:'Lost 2.5% of body weight',color:'#7c6af7'});
+  if(totPct>=5)  badges.push({icon:'🎯',label:'5% goal',desc:'Lost 5% of body weight',color:'#f7b26a'});
+  if(totPct>=10) badges.push({icon:'🌟',label:'10% legend',desc:'Lost 10% of body weight',color:'#f7d76a'});
+  // Streak
+  const dates=wi.map(e=>e.date).sort();
+  let maxStreak=1, cur=1;
+  for(let i=1;i<dates.length;i++){
+    const diff=(new Date(dates[i]+'T00:00:00')-new Date(dates[i-1]+'T00:00:00'))/(24*60*60*1000);
+    if(diff===1){cur++;maxStreak=Math.max(maxStreak,cur);}else cur=1;
+  }
+  if(maxStreak>=3)  badges.push({icon:'🔁',label:'3-day streak',desc:'Weighed in 3 days in a row',color:'#5fd4b3'});
+  if(maxStreak>=7)  badges.push({icon:'🗓️',label:'7-day streak',desc:'A full week of daily weigh-ins',color:'#f7b26a'});
+  if(maxStreak>=14) badges.push({icon:'⚡',label:'2-week streak',desc:'14 consecutive daily weigh-ins',color:'#f7d76a'});
+  // Best week
+  const curWk=getCurrentWeek();
+  let bestW=null;
+  for(let w=1;w<=curWk;w++){const p=weeklyPctLost(memberId,w);if(p!==null&&(bestW===null||p>bestW))bestW=p;}
+  if(bestW!==null&&bestW>0) badges.push({icon:'🏅',label:'Best week: '+bestW.toFixed(2)+'%',desc:'Your personal best weekly loss',color:'#f7b26a'});
+  // H2H wins
+  let h2hWins=0;
+  for(let w=1;w<=curWk;w++) getAllH2HResults(w).forEach(r=>{if(r.winner===memberId||(r.tied&&(r.p1===memberId||r.p2===memberId)))h2hWins+=r.tied?0.5:1;});
+  if(h2hWins>=1) badges.push({icon:'⚔️',label:'First H2H win',desc:'Won your first head-to-head',color:'#7c6af7'});
+  if(h2hWins>=3) badges.push({icon:'🗡️',label:'Hat-trick',desc:'Won 3 H2H matchups',color:'#7c6af7'});
+  if(h2hWins>=5) badges.push({icon:'👑',label:'Matchup king',desc:'Won 5 H2H matchups',color:'#f7d76a'});
+  return badges;
+}
+
+function getPersonalPeriodStart() {
+  const now=new Date(), p=personalPeriod;
+  if(p==='7d')  return ymd(new Date(now-7*86400000));
+  if(p==='30d') return ymd(new Date(now-30*86400000));
+  if(p==='3m')  return ymd(new Date(now-91*86400000));
+  if(p==='6m')  return ymd(new Date(now-182*86400000));
+  if(p==='1y')  return ymd(new Date(now-365*86400000));
+  return null;
+}
+
+// ─── AUTH ────────────────────────────────────────────────────────────────────
+onAuthStateChanged(auth, async user=>{
+  currentUser=user;
+  if(!user) { showScreen('screen-auth'); return; }
+  const snap=await getDoc(doc(db,'users',user.uid));
+  if(!snap.exists()) {
+    await setDoc(doc(db,'users',user.uid),{displayName:user.displayName||user.email,email:user.email,role:'user',createdAt:serverTimestamp()});
+    userProfile={displayName:user.displayName||user.email,email:user.email,role:'user'};
+  } else {
+    userProfile=snap.data();
+  }
+  checkPasswordReset();
+  // Detect ?viewAs=UID&comp=COMPID from admin portal Live View
+  const _params = new URLSearchParams(location.search);
+  const _viewAs = _params.get('viewAs'), _viewComp = _params.get('comp');
+  if(_viewAs && _viewComp && (userProfile?.role==='superAdmin'||userProfile?.role==='owner')) {
+    ghostUid = _viewAs;
+    ghostCompId = _viewComp;
+    // Clean URL so refreshing doesn't re-trigger
+    history.replaceState({}, '', location.pathname);
+  }
+  await loadMyComps();
+  startPersonalListeners();
+  // If ghost mode params set, enter that competition directly
+  if(ghostCompId) {
+    await enterComp(ghostCompId);
+    return;
+  }
+  if(myCompetitions.length===1) {
+    await enterComp(myCompetitions[0].compId);
+  } else if(myCompetitions.length===0) {
+    const code=sessionStorage.getItem('pendingJoin');
+    if(code) { sessionStorage.removeItem('pendingJoin'); await joinByCode(code); }
+    else showScreen('screen-select');
+    renderSelectScreen();
+  } else {
+    showScreen('screen-select');
+    renderSelectScreen();
+  }
+});
+
+function checkPasswordReset() {
+  const p=new URLSearchParams(location.search);
+  const mode=p.get('mode'), oobCode=p.get('oobCode');
+  if(mode==='resetPassword'&&oobCode) { showScreen('screen-reset'); $('reset-oob').value=oobCode||''; }
+}
+
+window.doLogin=async function(){
+  const email=$('auth-email').value.trim(), pass=$('auth-pass').value;
+  try { await signInWithEmailAndPassword(auth,email,pass); }
+  catch(e) { $('auth-err').textContent=friendlyErr(e.code); $('auth-err').style.display='block'; }
+};
+window.doRegister=async function(){
+  const name=$('reg-name').value.trim(), email=$('reg-email').value.trim(), pass=$('reg-pass').value;
+  if(!name||!email||!pass) { $('auth-err').textContent='Please fill in all fields'; $('auth-err').style.display='block'; return; }
+  try {
+    const cred=await createUserWithEmailAndPassword(auth,email,pass);
+    await updateProfile(cred.user,{displayName:name});
+  } catch(e) { $('auth-err').textContent=friendlyErr(e.code); $('auth-err').style.display='block'; }
+};
+window.doGoogle=async function(){ try { const {signInWithPopup}=await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js"); await signInWithPopup(auth,gp); } catch(e) { $('auth-err').textContent=e.message; $('auth-err').style.display='block'; } };
+window.doSignOut=async function(){ stopListeners(); currentCompId=null;currentComp=null;compMembership=null;competitors=[];allWeighIns=[];matchups=[];matchupsLoaded=false; await signOut(auth); };
+window.doForgotPw=async function(){ const email=$('auth-email').value.trim(); if(!email){$('auth-err').textContent='Enter your email first';$('auth-err').style.display='block';return;} await sendPasswordResetEmail(auth,email); toast('Reset email sent!'); };
+window.doConfirmReset=async function(){
+  const oob=$('reset-oob').value, pass=$('reset-pass').value;
+  if(!pass||pass.length<6){toast('Password must be at least 6 characters','danger');return;}
+  try { await confirmPasswordReset(auth,oob,pass); toast('Password reset! You can now sign in.'); showScreen('screen-auth'); history.replaceState({},'',location.pathname); }
+  catch(e) { toast(e.message,'danger'); }
+};
+window.showAuthTab=function(tab){
+  $('login-form').style.display=tab==='login'?'':'none';
+  $('reg-form').style.display=tab==='register'?'':'none';
+  $('auth-tab-login').classList.toggle('active',tab==='login');
+  $('auth-tab-reg').classList.toggle('active',tab==='register');
+  $('auth-err').style.display='none';
+};
+function friendlyErr(code) {
+  return {'auth/user-not-found':'No account found','auth/wrong-password':'Incorrect password','auth/invalid-credential':'Incorrect email or password','auth/email-already-in-use':'Email already registered','auth/weak-password':'Password must be at least 6 characters','auth/invalid-email':'Invalid email address'}[code]||'Something went wrong';
+}
+
+// ─── LISTENERS ───────────────────────────────────────────────────────────────
+function startPersonalListeners() {
+  if(!currentUser) return;
+  const wiUnsub=onSnapshot(query(collection(db,'users',uid(),'weighins'),orderBy('date','asc')),snap=>{
+    personalWeighIns=snap.docs.map(d=>({id:d.id,...d.data()}));
+    refreshPage();
+  });
+  unsubs.push(wiUnsub);
+  // Tracker goal is personal — load for the viewed user
+  // (ghostUid users' goals are readable by SA due to Firestore rules)
+  getDoc(doc(db,'users',uid(),'tracker','goal')).then(s=>{ if(s.exists()) { trackerGoal=s.data(); refreshPage(); } else { trackerGoal=null; refreshPage(); } });
+  // Check for unread SA replies to bug reports
+  checkAdminNotes();
+  // Friendships — wrapped in try/catch; rules may restrict access until verified
+  try {
+    unsubs.push(onSnapshot(query(collection(db,'friendships'),where('users','array-contains',uid())),snap=>{
+      friends=snap.docs.map(d=>({id:d.id,...d.data()})).filter(f=>f.status==='accepted');
+      friendRequests=snap.docs.map(d=>({id:d.id,...d.data()})).filter(f=>f.status==='pending'&&f.to===uid());
+      updateBadges(); refreshPage();
+    }, ()=>{}));
+  } catch(e){}
+  try {
+    unsubs.push(onSnapshot(query(collection(db,'conversations'),where('participants','array-contains',uid())),snap=>{
+      conversations=snap.docs.map(d=>({id:d.id,...d.data()})); updateBadges(); refreshPage();
+    }, ()=>{}));
+  } catch(e){}
+  try {
+    unsubs.push(onSnapshot(query(collection(db,'groupChats'),where('members','array-contains',uid())),snap=>{
+      groupChats=snap.docs.map(d=>({id:d.id,...d.data()})); updateBadges(); refreshPage();
+    }, ()=>{}));
+  } catch(e){}
+}
+
+function startCompListeners() {
+  if(!currentCompId) return;
+  // Members
+  unsubs.push(onSnapshot(collection(db,'competitions',currentCompId,'members'),snap=>{
+    competitors=snap.docs.map(d=>({uid:d.id,...d.data()}));
+    const me=competitors.find(c=>c.uid===uid());
+    compMembership=me||null;
+    updateAdminUI();
+    checkAutoMatchups();
+    refreshPage();
+  }));
+  // All weigh-ins (every member — needed for H2H calc, only weights not shown)
+  unsubs.push(onSnapshot(collection(db,'competitions',currentCompId,'weighins'),snap=>{
+    allWeighIns=snap.docs.map(d=>({id:d.id,...d.data()}));
+    refreshPage();
+  }));
+  // Matchups
+  unsubs.push(onSnapshot(collection(db,'competitions',currentCompId,'matchups'),snap=>{
+    matchups=snap.docs.map(d=>({id:d.id,...d.data()}));
+    matchupsLoaded=true;
+    refreshPage();
+  }));
+  // Chat
+  unsubs.push(onSnapshot(query(collection(db,'competitions',currentCompId,'chat'),orderBy('ts','asc')),snap=>{
+    chatMessages=snap.docs.map(d=>({id:d.id,...d.data()}));
+    refreshPage();
+  }));
+  // Feed
+  try {
+    unsubs.push(onSnapshot(query(collection(db,'feedPosts'),where('compId','==',currentCompId),orderBy('ts','desc')),snap=>{
+      feedPosts=snap.docs.map(d=>({id:d.id,...d.data()})); refreshPage();
+    }, ()=>{}));
+  } catch(e){}
+}
+
+function stopCompListeners() {
+  unsubs.forEach(u=>u());
+  unsubs=[];
+}
+function stopListeners() { unsubs.forEach(u=>u()); unsubs=[]; }
+
+async function checkAutoMatchups() {
+  // Auto-generate matchups when the competition start date arrives and matchups are empty
+  if(!currentCompId||!currentComp?.startDate) return;
+  if(!hasStarted()||isCompOver()) return;
+  if(matchups.length>0||!matchupsLoaded) return;
+  await autoGenerateMatchups();
+}
+
+function updateAdminUI() {
+  // Show/hide admin-only elements based on role.
+  // Everything else is identical for all users.
+  document.querySelectorAll('.admin-only').forEach(el=>{
+    el.style.display=isAdmin()?'':'none';
+  });
+  document.querySelectorAll('.sa-only').forEach(el=>{
+    el.style.display=isSA()?'':'none';
+  });
+  // Admin badge in nav
+  const badge=$('nav-admin-badge');
+  if(badge) { badge.style.display=isAdmin()?'':'none'; badge.textContent=isSA()?'SA':'Admin'; }
+}
+
+function updateBadges() {
+  const reqBadge=$('friend-req-badge');
+  if(reqBadge) { reqBadge.style.display=friendRequests.length?'':'none'; reqBadge.textContent=friendRequests.length; }
+  const unread=conversations.filter(c=>c.lastMsg&&c.lastMsg.uid!==uid()&&!c.readBy?.[uid()]).length
+             + groupChats.filter(g=>g.lastMsg&&g.lastMsg.uid!==uid()&&!g.readBy?.[uid()]).length;
+  const unreadBadge=$('unread-badge');
+  if(unreadBadge) { unreadBadge.style.display=unread?'':'none'; unreadBadge.textContent=unread; }
+}
+
+
+// ─── ADMIN NOTE BANNER ───────────────────────────────────────────────────────
+async function checkAdminNotes() {
+  if(!currentUser) return;
+  try {
+    const snap=await getDocs(query(collection(db,'bugReports'),where('userId','==',uid()),where('adminNoteRead','==',false)));
+    const unread=snap.docs.map(d=>({id:d.id,...d.data()}));
+    const banner=$('admin-note-banner'); if(!banner) return;
+    if(!unread.length){banner.style.display='none';return;}
+    const note=unread[0];
+    banner.style.display='';
+    banner.innerHTML=`<div style="display:flex;align-items:flex-start;gap:12px">
+      <span style="font-size:20px;flex-shrink:0">📬</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;font-size:14px;margin-bottom:4px">Response to your bug report</div>
+        <div style="font-size:13px;color:var(--muted);margin-bottom:4px;font-style:italic">"${note.title||''}"</div>
+        <div style="font-size:14px;line-height:1.5;margin-bottom:10px">${(note.adminNote||'').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>
+        <button data-rid="${note.id}" onclick="dismissAdminNote(this.dataset.rid)" class="btn btn-secondary btn-sm">Got it ✓</button>
+      </div>
+    </div>`;
+  } catch(e){}
+}
+window.dismissAdminNote=async function(id){
+  try{await updateDoc(doc(db,'bugReports',id),{adminNoteRead:true});const b=$('admin-note-banner');if(b)b.style.display='none';setTimeout(checkAdminNotes,300);}catch(e){}
+};
+
+
+// ─── GHOST MODE ──────────────────────────────────────────────────────────────
+// When SA opens the app via ?viewAs=UID&comp=COMPID from the admin portal,
+// the entire app renders as that user. ghostUid replaces uid() everywhere.
+// A banner at the top identifies whose view this is and allows exiting.
+function updateGhostBanner() {
+  const banner = $('ghost-banner');
+  if(!banner) return;
+  if(!ghostUid) { banner.style.display='none'; return; }
+  const member = competitors.find(c=>c.uid===ghostUid);
+  const name = member?.displayName || ghostUid;
+  banner.style.display = 'flex';
+  $('ghost-banner-name').textContent = name;
+  $('ghost-banner-comp').textContent = currentComp?.name || '';
+}
+window.exitGhostMode = async function() {
+  ghostUid = null;
+  ghostCompId = null;
+  const banner = $('ghost-banner');
+  if(banner) banner.style.display = 'none';
+  // Return to their own competition select
+  stopCompListeners();
+  currentCompId=null; currentComp=null; compMembership=null;
+  competitors=[]; allWeighIns=[]; matchups=[]; matchupsLoaded=false;
+  await loadMyComps();
+  showScreen('screen-select');
+  renderSelectScreen();
+};
+
+// ─── COMPETITION LOAD ────────────────────────────────────────────────────────
+async function loadMyComps() {
+  const snap=await getDocs(query(collection(db,'competitionMembers'),where('userId','==',uid())));
+  myCompetitions=snap.docs.map(d=>d.data()).filter(c=>!c.archived);
+}
+
+async function enterComp(compId) {
+  currentCompId=compId;
+  const snap=await getDoc(doc(db,'competitions',compId));
+  currentComp=snap.data();
+  matchupsLoaded=false; matchups=[];
+  if(currentComp?.suspended) { showSuspended(); return; }
+  stopCompListeners();
+  startCompListeners();
+  showScreen('screen-app');
+  showTab('compete');
+  currentMatchupWeek=getCurrentWeek();
+  // Show ghost banner if viewing as another user
+  updateGhostBanner();
+}
+
+function showSuspended() {
+  showScreen('screen-select');
+  $('select-content').innerHTML=`<div class="info-box"><div style="font-size:40px">🚫</div><h2>Competition Suspended</h2><p>This competition has been temporarily suspended. Please contact your organiser.</p><button class="btn btn-secondary" onclick="doSignOut()">Sign Out</button></div>`;
+}
+
+window.switchComp=async function(){
+  stopCompListeners();
+  currentCompId=null; currentComp=null; compMembership=null;
+  competitors=[]; allWeighIns=[]; matchups=[]; matchupsLoaded=false;
+  await loadMyComps();
+  showScreen('screen-select');
+  renderSelectScreen();
+};
+
+// ─── COMPETITION SELECT SCREEN ───────────────────────────────────────────────
+function renderSelectScreen() {
+  const el=$('select-content'); if(!el) return;
+  const active=myCompetitions.filter(c=>!c.archived);
+  el.innerHTML=`
+    <div class="auth-logo"><div style="font-size:36px">⚖️</div><div class="auth-logo-title">WeighBet</div></div>
+    ${active.length===0?`
+      <div class="info-box" style="margin-bottom:24px"><p>You're not in any competitions yet.</p></div>`:`
+      <div class="section-label">Your Competitions</div>
+      ${active.map(c=>`<button class="comp-row" onclick="enterComp('${c.compId}')">
+        <div>
+          <div style="font-weight:600">${c.compName||'Unnamed'}</div>
+          <div style="font-size:12px;color:var(--muted)">${c.role||'competitor'} · ${c.playerType==='free'?'Free':'Paying'}</div>
+        </div>
+        <span style="color:var(--muted)">→</span>
+      </button>`).join('')}
+    `}
+    <div class="section-label" style="margin-top:24px">Join a Competition</div>
+    <div style="display:flex;gap:8px">
+      <input id="join-code-input" class="input" placeholder="Invite code" style="flex:1;text-transform:uppercase">
+      <button class="btn btn-primary" onclick="doJoinCode()">Join</button>
+    </div>
+    <div id="join-err" style="color:var(--danger);font-size:13px;margin-top:8px;display:none"></div>
+    <div class="section-label" style="margin-top:24px">Create a Competition</div>
+    <div style="display:grid;gap:8px">
+      <input id="new-comp-name" class="input" placeholder="Competition name">
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px">
+        <div><label class="label">Start date</label><input type="date" id="new-comp-start" class="input"></div>
+        <div><label class="label">Weeks</label><input type="number" id="new-comp-weeks" class="input" value="8" min="1" max="52"></div>
+        <div><label class="label">Buy-in ($)</label><input type="number" id="new-comp-buyin" class="input" value="50" min="0"></div>
+      </div>
+      <button class="btn btn-primary" onclick="createComp()">Create Competition</button>
+    </div>
+    <div style="margin-top:24px;text-align:center"><button class="btn btn-ghost" onclick="doSignOut()">Sign Out</button></div>`;
+}
+
+window.doJoinCode=async function(){
+  const code=($('join-code-input')?.value||'').trim().toUpperCase();
+  if(!code) return;
+  await joinByCode(code);
+};
+
+async function joinByCode(code) {
+  const errEl=$('join-err');
+  try {
+    const snap=await getDocs(query(collection(db,'competitions'),where('inviteCode','==',code)));
+    if(snap.empty) { if(errEl){errEl.textContent='No competition found with that code.';errEl.style.display='block';} return; }
+    const compDoc=snap.docs[0];
+    await joinComp(compDoc.id, compDoc.data());
+  } catch(e) { if(errEl){errEl.textContent=e.message;errEl.style.display='block';} }
+}
+
+async function joinComp(compId, comp) {
+  const existing=await getDoc(doc(db,'competitions',compId,'members',uid()));
+  if(existing.exists()) { await enterComp(compId); return; }
+  await setDoc(doc(db,'competitions',compId,'members',uid()),{
+    uid:uid(), displayName:userProfile?.displayName||'', email:currentUser.email||'',
+    role:'competitor', playerType:'paying', joinedAt:serverTimestamp()
+  });
+  await setDoc(doc(db,'competitionMembers',compId+'_'+uid()),{
+    userId:uid(), compId, compName:comp.name||'', role:'competitor', playerType:'paying'
+  });
+  await enterComp(compId);
+}
+
+window.createComp=async function(){
+  const name=$('new-comp-name')?.value.trim();
+  const start=$('new-comp-start')?.value;
+  const weeks=parseInt($('new-comp-weeks')?.value)||8;
+  const buyin=parseFloat($('new-comp-buyin')?.value)||0;
+  if(!name) { toast('Enter a competition name','danger'); return; }
+  const code=Math.random().toString(36).substring(2,8).toUpperCase();
+  const ref=await addDoc(collection(db,'competitions'),{name,startDate:start||null,weeks,buyin,inviteCode:code,createdBy:uid(),createdAt:serverTimestamp()});
+  await setDoc(doc(db,'competitions',ref.id,'members',uid()),{
+    uid:uid(), displayName:userProfile?.displayName||'', email:currentUser.email||'',
+    role:'admin', playerType:'paying', joinedAt:serverTimestamp()
+  });
+  await setDoc(doc(db,'competitionMembers',ref.id+'_'+uid()),{
+    userId:uid(), compId:ref.id, compName:name, role:'admin', playerType:'paying'
+  });
+  await enterComp(ref.id);
+};
+
+// ─── TAB SYSTEM ──────────────────────────────────────────────────────────────
+let activeTab='compete', activeSub={compete:'overview',me:'journey',social:'feed',settings:'prefs'};
+
+function showTab(tab) {
+  // Show float button only when in app and a comp is loaded
+  const fb=$('float-btn');
+  if(fb) fb.style.display=currentCompId?'flex':'none';
+  activeTab=tab;
+  document.querySelectorAll('.tab-panel').forEach(el=>el.style.display='none');
+  const panel=$('tab-'+tab); if(panel) panel.style.display='block';
+  document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.tab===tab));
+  document.querySelectorAll('.mob-nav-item').forEach(el=>el.classList.toggle('active',el.dataset.tab===tab));
+  renderSub(tab, activeSub[tab]||'overview');
+  window.scrollTo(0,0);
+}
+window.showTab=showTab;
+
+function showSub(tab, sub) {
+  activeSub[tab]=sub;
+  document.querySelectorAll(`[data-subtab][data-maintab="${tab}"]`).forEach(el=>el.classList.toggle('active',el.dataset.subtab===sub));
+  document.querySelectorAll(`[data-subpanel][data-maintab="${tab}"]`).forEach(el=>el.style.display=el.dataset.subpanel===sub?'block':'none');
+  renderSub(tab,sub);
+}
+window.showSub=showSub;
+
+function renderSub(tab, sub) {
+  const key=tab+'/'+sub;
+  switch(key) {
+    case 'compete/overview':  renderOverview(); break;
+    case 'compete/prizes':    renderPrizes(); break;
+    case 'compete/weekly':    renderWeekly(); break;
+    case 'me/journey':        renderJourney(); break;
+
+    case 'me/profile':        renderProfile(); break;
+    case 'social/feed':       renderFeed(); break;
+    case 'social/friends':    renderFriends(); break;
+    case 'social/messages':   renderMessages(); break;
+    case 'settings/prefs':    renderPrefs(); break;
+    case 'settings/admin':    renderAdminSettings(); break;
+  }
+}
+
+function refreshPage() { updateGhostBanner(); renderSub(activeTab, activeSub[activeTab]); updateBadges(); }
+window.refreshPage=refreshPage;
+
+// ─── COMPETE — OVERVIEW ──────────────────────────────────────────────────────
+function renderOverview() {
+  const el=$('panel-overview'); if(!el) return;
+  if(!currentComp) { el.innerHTML='<div class="empty">No competition loaded.</div>'; return; }
+
+  const curWk=getCurrentWeek(), weeks=currentComp.weeks||8, over=isCompOver();
+  const stats=competitors.map(c=>({
+    uid:c.uid, name:c.displayName||'?', paying:c.playerType!=='free',
+    totalPct:totalPctLost(c.uid), wi:weighInsFor(c.uid).length
+  })).filter(c=>c.wi>0).sort((a,b)=>(b.totalPct||0)-(a.totalPct||0));
+
+  const myStats=stats.find(c=>c.uid===uid());
+  const myRank=stats.findIndex(c=>c.uid===uid())+1;
+  const pool=getPrizePool(), wpp=Math.max(1,Math.floor(payingMembers().length/2));
+  const wBL=pool>0?pool*0.05/weeks:0;
+
+  // Week H2H for this user
+  const myMatch=matchups.find(m=>m.week===curWk&&(m.p1===uid()||m.p2===uid()));
+  let matchCard='';
+  if(!matchupsLoaded) {
+    matchCard=`<div class="card" style="text-align:center;padding:20px;color:var(--muted)">⏳ Loading match data...</div>`;
+  } else if(myMatch) {
+    const r=h2hResult(myMatch,curWk);
+    const opp=myMatch.p1===uid()?myMatch.p2:myMatch.p1;
+    const oppName=opp==='BYE'?'BYE':nameFor(opp);
+    const myPct=r.p1pct!==undefined&&myMatch.p1===uid()?r.p1pct:r.p2pct;
+    const oppPct=opp==='BYE'?null:(myMatch.p1===uid()?r.p2pct:r.p1pct);
+    const won=r.winner===uid(), lost=r.winner&&r.winner!==uid()&&!r.tied;
+    matchCard=`<div class="card">
+      <div class="card-label">⚔️ Week ${curWk} Match${r.matchType==='free'?' · Friendly':''}${r.matchType==='wildcard'?' · Wildcard':''}</div>
+      <div class="matchup-vs">
+        <div class="matchup-player ${lost?'dim':''}">
+          ${avatar(userProfile?.displayName||'Me',44)}
+          <div class="mp-name">${userProfile?.displayName||'Me'}${r.winner===uid()||r.tied?' 👑':''}</div>
+          <div class="mp-pct ${won?'win':''}">${myPct!=null?fmtPct(myPct):'⏳ Pending'}</div>
+        </div>
+        <div class="vs-sep">VS</div>
+        <div class="matchup-player ${won?'dim':''}">
+          ${opp==='BYE'?`<div class="avatar-bye">BYE</div>`:avatar(oppName,44)}
+          <div class="mp-name">${oppName}${r.winner===opp&&!r.tied?' 👑':''}</div>
+          <div class="mp-pct ${lost?'win':''}">${opp==='BYE'?'—':oppPct!=null?fmtPct(oppPct):'⏳ Pending'}</div>
+        </div>
+      </div>
+      <div class="matchup-note ${won?'note-win':lost?'note-loss':''}">${r.note}${r.prize>0&&r.winner?' · '+fmtMoney(r.prize):''}</div>
+    </div>`;
+  } else if(hasStarted()) {
+    matchCard=`<div class="card" style="text-align:center;padding:20px;color:var(--muted)">No match scheduled for Week ${curWk}.</div>`;
+  }
+
+  // Leaderboard top 5
+  const top=stats.slice(0,5);
+  const inTop=top.some(c=>c.uid===uid());
+  if(!inTop&&myStats) top.push(myStats);
+
+  el.innerHTML=`
+    ${over?`<div class="card card-over"><div style="font-size:24px">🏁</div><h3>Competition Complete!</h3><p>Final results are in. See Prizes tab for the full breakdown.</p></div>`:''}
+    <div class="stats-strip">
+      <div class="stat-item"><div class="stat-val">${fmtPct(totalPctLost(uid()))}</div><div class="stat-lbl">Total Lost</div></div>
+      <div class="stat-item"><div class="stat-val">${myRank>0?'#'+myRank:'—'}</div><div class="stat-lbl">Rank</div></div>
+      <div class="stat-item"><div class="stat-val">W${curWk}<span style="color:var(--muted);font-size:14px">/${weeks}</span></div><div class="stat-lbl">Week</div></div>
+      ${pool>0?`<div class="stat-item"><div class="stat-val">${fmtMoney(pool)}</div><div class="stat-lbl">Pool</div></div>`:''}
+    </div>
+    ${matchCard}
+    <div class="card">
+      <div class="card-label">🏆 Leaderboard</div>
+      ${stats.length===0?`<div class="empty">No weigh-ins recorded yet.</div>`:top.map((c,i)=>{
+        const isMe=c.uid===uid();
+        const medal=i===0?'🥇':i===1?'🥈':i===2?'🥉':'';
+        return `<div class="lb-row ${isMe?'lb-me':''}">
+          <span class="lb-rank">${medal||stats.indexOf(c)+1}</span>
+          ${avatar(c.name,32)}
+          <span class="lb-name">${c.name}${isMe?' <span class="tag">you</span>':''}</span>
+          <span class="lb-pct">${fmtPct(c.totalPct)}</span>
+        </div>`;
+      }).join('')}
+      ${stats.length>5?`<div style="text-align:center;margin-top:8px"><button class="btn btn-ghost btn-sm" onclick="showTab('compete');showSub('compete','prizes')">View full leaderboard →</button></div>`:''}
+    </div>
+    <div class="card">
+      <div class="card-label">📊 Progress Chart</div>
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <button class="pill ${compChartMode==='top5'?'pill-active':''}" onclick="setChartMode('top5')">Top 5</button>
+        <button class="pill ${compChartMode==='compare'?'pill-active':''}" onclick="setChartMode('compare')">Compare</button>
+      </div>
+      ${compChartMode==='compare'?`<select class="input" id="chart-compare-sel" onchange="onChartCompareChange()" style="margin-bottom:12px">
+        <option value="">Select a competitor...</option>
+        ${competitors.filter(c=>c.uid!==uid()).map(c=>`<option value="${c.uid}" ${c.uid===compCompareUid?'selected':''}>${c.displayName}</option>`).join('')}
+      </select>`:''}
+      <canvas id="comp-chart" style="max-height:220px"></canvas>
+    </div>`;
+
+  renderCompChart();
+}
+
+function setChartMode(mode) { compChartMode=mode; renderOverview(); }
+window.setChartMode=setChartMode;
+window.onChartCompareChange=function(){ compCompareUid=$('chart-compare-sel')?.value||null; renderCompChart(); };
+
+function renderCompChart() {
+  const canvas=$('comp-chart'); if(!canvas) return;
+  if(dashChart) { dashChart.destroy(); dashChart=null; }
+  if(compChartMode==='compare'&&!compCompareUid) return;
+
+  const weeks=currentComp?.weeks||8;
+  const labels=Array.from({length:weeks},(_,i)=>'W'+(i+1));
+  const curWk=getCurrentWeek();
+  const me=uid();
+  let showIds=[];
+  if(compChartMode==='compare'&&compCompareUid) {
+    showIds=[me,compCompareUid];
+  } else {
+    const stats=competitors.map(c=>({uid:c.uid,pct:totalPctLost(c.uid)})).filter(c=>c.pct!=null).sort((a,b)=>b.pct-a.pct);
+    showIds=stats.slice(0,5).map(c=>c.uid);
+    if(!showIds.includes(me)&&totalPctLost(me)!=null) showIds.push(me);
+  }
+
+  const datasets=showIds.map(id=>{
+    const name=nameFor(id), isMe=id===me;
+    const color=avatarColor(name);
+    const sw=startWeight(id);
+    const data=Array.from({length:weeks},(_,i)=>{
+      const w=i+1; if(w>curWk) return null;
+      const end=lastWIForWeek(id,w); if(!end||!sw) return null;
+      return (end.weight-sw.weight)/sw.weight*100;
+    });
+    return {label:name,data,borderColor:color,backgroundColor:color+'33',borderWidth:isMe?3:1.5,pointRadius:3,tension:0.3,spanGaps:false};
+  });
+
+  const {Chart,registerables}=window.Chart||{};
+  if(!window.Chart) return;
+  dashChart=new window.Chart(canvas,{type:'line',data:{labels,datasets},options:{
+    responsive:true,maintainAspectRatio:true,
+    plugins:{legend:{display:true,position:'bottom',labels:{color:'#9090a0',font:{family:'DM Sans',size:11},boxWidth:12}}},
+    scales:{
+      x:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#9090a0',font:{size:11}}},
+      y:{
+        grid:{color:'rgba(255,255,255,0.05)'},
+        ticks:{color:'#9090a0',font:{size:11},callback:v=>v.toFixed(1)+'%'},
+        // Buffer above and below min/max so lines don't touch edges
+        afterDataLimits(scale){scale.max+=0.3;scale.min-=0.3;}
+      }
+    }
+  }});
+}
+
+
+// ─── COMPETE — WEEKLY STATS ──────────────────────────────────────────────────
+function renderWeekScroller() {
+  var carousel  = document.getElementById('week-carousel');
+  var labelEl   = document.getElementById('week-carousel-label');
+  if(!carousel) return;
+  var weeks   = currentComp?.weeks || 8;
+  var curWeek = getCurrentWeek();
+  if(selectedWeek === null) selectedWeek = curWeek;
+
+  // Build slides using DOM (not innerHTML) — this is why the original worked
+  carousel.innerHTML = '';
+  for(var w = 1; w <= weeks; w++) {
+    var slide = document.createElement('div');
+    slide.className = 'week-carousel-slide';
+    slide.dataset.week = w;
+    var item = document.createElement('div');
+    var cls = 'week-carousel-item';
+    if(w === selectedWeek) cls += ' active';
+    if(w === curWeek) cls += ' current-week';
+    item.className = cls;
+    item.textContent = 'W' + w;
+    item.onclick = (function(wk) { return function() {
+      selectedWeek = wk;
+      var target = carousel.children[wk - 1];
+      if(target) carousel.scrollTo({ left: target.offsetLeft - carousel.offsetWidth/2 + target.offsetWidth/2, behavior: 'smooth' });
+      renderWeekScroller();
+    }; })(w);
+    slide.appendChild(item);
+    carousel.appendChild(slide);
+  }
+
+  // Scroll to selected (no animation on build)
+  var targetSlide = carousel.children[selectedWeek - 1];
+  if(targetSlide) carousel.scrollLeft = targetSlide.offsetLeft - carousel.offsetWidth/2 + targetSlide.offsetWidth/2;
+
+  // Label
+  if(labelEl) {
+    labelEl.textContent = 'Week ' + selectedWeek + ' of ' + weeks + (selectedWeek === curWeek ? ' · current week' : '');
+    labelEl.style.color = selectedWeek === curWeek ? 'var(--accent)' : 'var(--muted)';
+  }
+
+  // Attach scroll listener once
+  if(!carousel._scrollBound) {
+    carousel._scrollBound = true;
+    var scrollTimer = null;
+    carousel.addEventListener('scroll', function() {
+      clearTimeout(scrollTimer);
+      scrollTimer = setTimeout(function() {
+        var centre = carousel.scrollLeft + carousel.offsetWidth / 2;
+        var best = 1, bestDist = Infinity;
+        Array.from(carousel.children).forEach(function(slide) {
+          var mid = slide.offsetLeft + slide.offsetWidth / 2;
+          var dist = Math.abs(mid - centre);
+          if(dist < bestDist) { bestDist = dist; best = parseInt(slide.dataset.week); }
+        });
+        if(best !== selectedWeek) {
+          selectedWeek = best;
+          Array.from(carousel.children).forEach(function(slide) {
+            var item = slide.querySelector('.week-carousel-item');
+            var wn = parseInt(slide.dataset.week);
+            if(item) { item.classList.toggle('active', wn === selectedWeek); item.classList.toggle('current-week', wn === curWeek); }
+          });
+          if(labelEl) {
+            labelEl.textContent = 'Week ' + selectedWeek + ' of ' + weeks + (selectedWeek === curWeek ? ' · current week' : '');
+            labelEl.style.color = selectedWeek === curWeek ? 'var(--accent)' : 'var(--muted)';
+          }
+          renderWeekDetail(selectedWeek);
+        }
+      }, 80);
+    }, {passive:true});
+  }
+  renderWeekDetail(selectedWeek);
+}
+
+function renderWeekly() {
+  const el=$('panel-weekly'); if(!el) return;
+  el.innerHTML=`
+    <div id="week-carousel-wrap">
+      <div id="week-carousel-window"></div>
+      <div id="week-carousel" style="padding-left:calc(50% - 40px);padding-right:calc(50% - 40px)"></div>
+    </div>
+    <div id="week-carousel-label" style="text-align:center;font-size:13px;color:var(--muted);margin:8px 0 14px"></div>
+    <div id="week-detail" style="overflow:hidden"></div>`;
+  renderWeekScroller();
+}
+
+function renderWeekDetail(w) {
+  var weeks=currentComp?.weeks||8;
+  var pool=getPrizePool(), wBL=pool>0?+(pool*0.05/weeks).toFixed(2):0;
+  var el2=document.getElementById('week-detail'); if(!el2) return;
+
+  var bl=payingMembers().map(function(c){return {uid:c.uid,name:c.displayName,pct:weeklyPctLost(c.uid,w)};}).filter(function(x){return x.pct!=null;}).sort(function(a,b){return b.pct-a.pct;});
+  var wm=matchups.filter(function(m){return m.week===w;});
+  var matchHtml='';
+  if(!matchupsLoaded) {
+    matchHtml='<div class="empty">⏳ Loading match data...</div>';
+  } else if(wm.length===0) {
+    matchHtml='<div class="empty">No matches for this week.</div>';
+  } else {
+    matchHtml=wm.map(function(m){
+      var r=h2hResult(m,w);
+      var n1=nameFor(m.p1), n2=m.p2==='BYE'?'BYE':nameFor(m.p2);
+      var p1w=r.winner===m.p1, p2w=r.winner===m.p2;
+      var isMe=m.p1===uid()||m.p2===uid();
+      var typeLabel=r.matchType==='wildcard'?'Wildcard':r.matchType==='free'?'Friendly':'H2H';
+      var myWin=r.winner===uid()||(r.tied&&isMe);
+      var myLoss=r.winner&&r.winner!==uid()&&isMe;
+      var p1col=p1w?'var(--success)':'var(--muted)';
+      var p2col=p2w?'var(--success)':'var(--muted)';
+      var p1op=p2w&&!r.tied?'0.45':'1';
+      var p2op=p1w&&!r.tied?'0.45':'1';
+      var noteClass='cm-note'+(myWin?' cm-note-win':myLoss?' cm-note-loss':'');
+      var byeDiv='<div class="avatar-bye" style="width:28px;height:28px;font-size:9px">BYE</div>';
+      var html='';
+      html+='<div class="compact-match'+(isMe?' compact-match-me':'')+'">';
+        html+='<div class="cm-label">Week '+w+' · '+typeLabel+'</div>';
+        html+='<div class="cm-row">';
+          html+='<div class="cm-player" style="opacity:'+p1op+'">';
+            html+=avatar(n1,28);
+            html+='<span class="cm-name">'+(p1w||r.tied?'&#x1F451; ':'')+n1+'</span>';
+            html+='<span class="cm-pct" style="color:'+p1col+'">'+(r.p1pct!=null?fmtPct(r.p1pct):'&mdash;')+'</span>';
+          html+='</div>';
+          html+='<span class="cm-vs">VS</span>';
+          html+='<div class="cm-player cm-player-right" style="opacity:'+p2op+'">';
+            html+='<span class="cm-pct" style="color:'+p2col+'">'+(m.p2==='BYE'?'&mdash;':r.p2pct!=null?fmtPct(r.p2pct):'&mdash;')+'</span>';
+            html+='<span class="cm-name">'+(p2w||r.tied?'&#x1F451; ':'')+n2+'</span>';
+            html+=(m.p2==='BYE'?byeDiv:avatar(n2,28));
+          html+='</div>';
+        html+='</div>';
+        html+='<div class="'+noteClass+'">'+r.note+(r.prize>0&&r.winner?' · '+fmtMoney(r.prize):'')+'</div>';
+      html+='</div>';
+      return html;
+    }).join('');
+  }
+
+  el2.innerHTML=(bl.length>0?
+    '<div class="card card-bl" style="text-align:center;margin-bottom:10px">'
+      +'<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);margin-bottom:10px">📉 Weekly Biggest Loser</div>'
+      +'<div style="display:flex;flex-direction:column;align-items:center;gap:6px">'
+        +avatar(bl[0].name,48)
+        +'<div style="font-weight:700;font-size:16px">'+bl[0].name+(bl[0].uid===uid()?' <span class="tag">you</span>':'')+'</div>'
+        +'<div style="font-size:22px;font-weight:800;color:var(--accent2)">'+fmtPct(bl[0].pct)+'</div>'
+        +(wBL>0?'<div style="font-weight:700;color:var(--accent3)">'+fmtMoney(wBL)+' bonus</div>':'')
+      +'</div>'
+    +'</div>':'')+matchHtml;
+}
+
+window.selectWeek=function(w){ selectedWeek=w; renderWeekScroller(); };
+
+// ─── COMPETE — H2H ───────────────────────────────────────────────────────────
+function renderMatchups() {
+  const el=$('panel-h2h'); if(!el) return;
+  const weeks=currentComp?.weeks||8;
+  const w=currentMatchupWeek;
+  const wm=matchups.filter(m=>m.week===w);
+
+  let content='';
+  if(!matchupsLoaded) {
+    content=`<div class="empty">⏳ Loading match data...</div>`;
+  } else if(matchups.length===0) {
+    content=`<div class="empty">No matches scheduled yet.</div>`;
+  } else if(wm.length===0) {
+    content=`<div class="empty">No matches for Week ${w}.</div>`;
+  } else {
+    // Biggest loser for this week
+    const bl=payingMembers().map(c=>({uid:c.uid,name:c.displayName,pct:weeklyPctLost(c.uid,w)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct);
+    const pool=getPrizePool(), wBL=pool>0?+(pool*0.05/weeks).toFixed(2):0;
+    if(bl.length>0) {
+      content+=`<div class="card card-bl">
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);margin-bottom:8px">📉 Weekly Biggest Loser</div>
+        <div style="display:flex;align-items:center;gap:10px">
+          ${avatar(bl[0].name,40)}
+          <div>
+            <div style="font-weight:700;font-size:15px">${bl[0].name}</div>
+            <div style="font-size:16px;font-weight:800;color:var(--accent2)">${fmtPct(bl[0].pct)}</div>
+          </div>
+          ${wBL>0?`<div style="margin-left:auto;font-weight:700;color:var(--accent3)">${fmtMoney(wBL)}</div>`:''}
+        </div>
+      </div>`;
+    }
+
+    content+=wm.map(m=>{
+      const r=h2hResult(m,w);
+      const n1=nameFor(m.p1), n2=m.p2==='BYE'?'BYE':nameFor(m.p2);
+      const p1w=r.winner===m.p1, p2w=r.winner===m.p2;
+      const isMyMatch=m.p1===uid()||m.p2===uid();
+      return `<div class="card ${isMyMatch?'card-highlight':''}">
+        <div class="card-label">Week ${w} · ${r.matchType==='free'?'Friendly':r.matchType==='wildcard'?'Wildcard':'Head to Head'}</div>
+        <div class="matchup-vs">
+          <div class="matchup-player ${p2w?'dim':''}">
+            ${avatar(n1,44)}
+            <div class="mp-name">${p1w||r.tied?'👑 ':''} ${n1}</div>
+            <div class="mp-pct ${p1w?'win':''}">${r.p1pct!=null?fmtPct(r.p1pct):'⏳ Pending'}</div>
+          </div>
+          <div class="vs-sep">VS</div>
+          <div class="matchup-player ${p1w?'dim':''}">
+            ${m.p2==='BYE'?`<div class="avatar-bye">BYE</div>`:avatar(n2,44)}
+            <div class="mp-name">${p2w||r.tied?'👑 ':''} ${n2}</div>
+            <div class="mp-pct ${p2w?'win':''}">${m.p2==='BYE'?'—':r.p2pct!=null?fmtPct(r.p2pct):'⏳ Pending'}</div>
+          </div>
+        </div>
+        <div class="matchup-note ${r.winner===uid()||r.tied&&(m.p1===uid()||m.p2===uid())?'note-win':r.winner&&r.winner!==uid()&&(m.p1===uid()||m.p2===uid())?'note-loss':''}">${r.note}${r.prize>0&&r.winner?' · '+fmtMoney(r.prize):''}</div>
+      </div>`;
+    }).join('');
+  }
+
+  el.innerHTML=`
+    <div class="week-nav">
+      <button class="btn-icon" onclick="changeWeek(-1)" ${w<=1?'disabled':''}>◀</button>
+      <span style="font-weight:700;font-size:15px">Week ${w} of ${weeks}</span>
+      <button class="btn-icon" onclick="changeWeek(1)" ${w>=weeks?'disabled':''}>▶</button>
+    </div>
+    ${content}`;
+}
+window.changeWeek=function(d){ const max=currentComp?.weeks||8; currentMatchupWeek=Math.max(1,Math.min(currentMatchupWeek+d,max)); renderMatchups(); };
+
+
+// Combined leaderboard for prizes tab — sortable by earnings or % lost
+function renderCombinedLb(earnList, lbStats, sortBy, myUid) {
+  const allUids=[...new Set([...earnList.map(e=>e.uid),...lbStats.map(c=>c.uid)])];
+  const rows=allUids.map(id=>{
+    const earn=earnList.find(e=>e.uid===id)?.total||0;
+    const pct=lbStats.find(c=>c.uid===id)?.pct||null;
+    return {uid:id, earn, pct};
+  });
+  const sorted=rows.slice().sort((a,b)=>sortBy==='earn'?(b.earn-a.earn):(b.pct||0)-(a.pct||0));
+  if(sorted.length===0) return '<div class="empty">No data yet.</div>';
+  return sorted.map((r,i)=>{
+    const isMe=r.uid===myUid;
+    const rc=i===0?'#f7d76a':i===1?'#c0c0c0':i===2?'#cd7f32':'var(--muted)';
+    const isFreeP=lbStats.find(c=>c.uid===r.uid)?.free||false;
+    return `<div class="earn-row ${isMe?'earn-me':''}">
+      <span style="font-weight:700;font-size:16px;width:24px;text-align:center;color:${rc}">${i+1}</span>
+      ${avatar(nameFor(r.uid),32)}
+      <span style="flex:1;font-weight:500;font-size:13px">${nameFor(r.uid)}${isMe?' <span class="tag">you</span>':''}${isFreeP?' <span class="tag" style="background:rgba(107,107,128,0.15);color:var(--muted)">free</span>':''}</span>
+      <span style="text-align:right">
+        ${!isFreeP?`<div style="font-family:Syne,sans-serif;font-weight:800;font-size:16px;color:var(--accent3)">${fmtMoney(r.earn)}</div>`:''}
+        ${r.pct!=null?`<div style="font-size:11px;color:var(--accent2)">${fmtPct(r.pct)}</div>`:''}
+      </span>
+    </div>`;
+  }).join('');
+}
+// Store sort state globally so toggle persists
+window._lbSort='pct';
+window.setLbSort=function(sort){
+  window._lbSort=sort;
+  document.querySelectorAll('#lb-sort-earn,#lb-sort-pct').forEach(b=>b.classList.toggle('pill-active',b.id==='lb-sort-'+sort));
+  // Re-render just the list
+  renderPrizes();
+};
+
+// ─── COMPETE — PRIZES ────────────────────────────────────────────────────────
+function renderPrizes() {
+  const el=$('panel-prizes'); if(!el) return;
+  if(!matchupsLoaded&&currentComp?.startDate) {
+    el.innerHTML=`<div class="card"><div class="empty">⏳ Loading match data...</div></div>`;
+    return;
+  }
+  const pool=getPrizePool(), weeks=currentComp?.weeks||8;
+  const paying=payingMembers(), wpp=Math.max(1,Math.floor(paying.length/2));
+  const curWk=getCurrentWeek(), isFinal=curWk===weeks;
+  const wBL=pool*0.05/weeks;
+  const finalBonus=isFinal?getFinalWeekBonus():0;
+  const f1st=pool*0.45+finalBonus/2, f2nd=pool*0.15+finalBonus/2;
+  const curPrize=getWeeklyH2HPrize(curWk);
+
+  // Earnings — all competitors
+  const earnMap={};
+  const finalPrize=getFinalWeekPrize();
+  for(let w=1;w<curWk;w++) {
+    getAllH2HResults(w).forEach(r=>{
+      // r.prize is already 0 for free-player wins, free-vs-free, and unclaimed slots
+      if(r.tied) { if(r.prize1>0) earnMap[r.p1]=(earnMap[r.p1]||0)+r.prize1; if(r.prize2>0) earnMap[r.p2]=(earnMap[r.p2]||0)+r.prize2; }
+      else if(r.winner&&r.prize>0) earnMap[r.winner]=(earnMap[r.winner]||0)+r.prize;
+    });
+    // Weekly BL bonus — paying members only
+    paying.map(c=>({uid:c.uid,pct:weeklyPctLost(c.uid,w)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct).slice(0,1).forEach(c=>{ earnMap[c.uid]=(earnMap[c.uid]||0)+wBL; });
+  }
+  // Filter out free players — they can't earn prize money
+  const earnList=Object.entries(earnMap).map(([id,total])=>({uid:id,total})).filter(e=>!isFree(e.uid)).sort((a,b)=>b.total-a.total);
+
+  // Final leaderboard by totalPct for BL prizes
+  // All competitors appear in % lost standings, free or paying
+  const lbStats=competitors.map(c=>({uid:c.uid,name:c.displayName,pct:totalPctLost(c.uid),free:c.playerType==='free'})).filter(c=>c.pct!=null).sort((a,b)=>b.pct-a.pct);
+
+  el.innerHTML=`
+    <div class="prize-pill pp-gold">
+      <div><div class="pp-label">🥇 Biggest Loser — 1st Place</div><div class="pp-sub">45% pool${finalBonus>0?' + final week bonus':''}</div></div>
+      <div class="pp-val">${fmtMoney(f1st)}</div>
+    </div>
+    <div class="prize-pill pp-silver">
+      <div><div class="pp-label">🥈 Biggest Loser — 2nd Place</div><div class="pp-sub">15% pool${finalBonus>0?' + final week bonus':''}</div></div>
+      <div class="pp-val">${fmtMoney(f2nd)}</div>
+    </div>
+    <div class="prize-pill pp-accent">
+      <div><div class="pp-label">⚔️ Weekly H2H</div><div class="pp-sub">Base ${fmtMoney(pool*0.35/weeks/wpp)}/win · Week ${curWk}: ${fmtMoney(curPrize)}/win</div></div>
+      <div class="pp-val">${fmtMoney(curPrize)}<span style="font-size:12px;color:var(--muted)">/win</span></div>
+    </div>
+    <div class="prize-pill pp-teal">
+      <div><div class="pp-label">📉 Weekly Biggest Loser Bonus</div><div class="pp-sub">5% pool ÷ ${weeks} weeks</div></div>
+      <div class="pp-val">${fmtMoney(wBL)}<span style="font-size:12px;color:var(--muted)">/wk</span></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <div class="card-label" style="margin-bottom:0">🏆 Leaderboard</div>
+        <div style="display:flex;gap:4px">
+          <button class="pill" id="lb-sort-earn" onclick="setLbSort('earn')" style="font-size:11px;padding:4px 10px">💰 Earnings</button>
+          <button class="pill pill-active" id="lb-sort-pct" onclick="setLbSort('pct')" style="font-size:11px;padding:4px 10px">📉 % Lost</button>
+        </div>
+      </div>
+      <p style="color:var(--muted);font-size:12px;margin-bottom:12px">H2H wins + weekly BL bonuses from completed weeks. Biggest Loser prizes at competition end.</p>
+      <div id="lb-combined-list">
+        ${renderCombinedLb(earnList, lbStats, window._lbSort||'pct', uid())}
+      </div>
+    </div>`;
+}
+
+// ─── ME — JOURNEY ────────────────────────────────────────────────────────────
+function renderJourney() {
+  const el=$('panel-journey'); if(!el) return;
+  const wi=personalWeighIns;
+  const compWI=weighInsFor(uid());
+  const sw=wi.length?wi[0]:null;
+  const latest=wi.length?wi[wi.length-1]:null;
+  const curWk=getCurrentWeek();
+  const unit=sw?.unit||trackerGoal?.unit||'kg';
+
+  // Earnings
+  let myEarnings=0;
+  if(matchupsLoaded) {
+    const weeks=currentComp?.weeks||8, pool=getPrizePool(), wBL=pool*0.05/weeks;
+    for(let w=1;w<curWk;w++) {
+      getAllH2HResults(w).forEach(r=>{
+        // Use r.prize directly — already 0 for free player wins
+        if(r.tied){ if(r.p1===uid()&&r.prize1>0) myEarnings+=r.prize1; if(r.p2===uid()&&r.prize2>0) myEarnings+=r.prize2; }
+        else if(r.winner===uid()&&r.prize>0) myEarnings+=r.prize;
+      });
+      // Weekly BL bonus — only if current user is paying
+      if(!isFree(uid())) {
+        const bl=payingMembers().map(c=>({uid:c.uid,pct:weeklyPctLost(c.uid,w)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct);
+        if(bl.length>0&&bl[0].uid===uid()) myEarnings+=wBL;
+      }
+    }
+  }
+  let h2hWins=0;
+  for(let w=1;w<curWk;w++) getAllH2HResults(w).forEach(r=>{ if(r.winner===uid()||(r.tied&&(r.p1===uid()||r.p2===uid()))) h2hWins+=r.tied?0.5:1; });
+
+  // Goal & BMI calculations
+  const curW=latest?.weight||null;
+  const targetW=trackerGoal?.targetWeight||null;
+  const heightCm=trackerGoal?.heightCm||null;
+  const bmi=curW&&heightCm?calcBMI(curW,heightCm):null;
+  const bmiCat=bmiCategory(bmi);
+  const weekRate=calcWeeklyRate(wi);
+  const goalStartWI=trackerGoal?.goalStartDate?wi.filter(e=>e.date>=trackerGoal.goalStartDate):wi;
+  const goalSW=goalStartWI.length?goalStartWI[0]:sw;
+  const projDate=targetW&&goalStartWI.length>=2?calcProjectedDate(goalStartWI,targetW):null;
+  const bodyFat=curW&&heightCm&&trackerGoal?.waistCm&&trackerGoal?.neckCm
+    ?calcBodyFatNavy(curW,heightCm,trackerGoal.waistCm,trackerGoal.neckCm,trackerGoal.hipCm||null,trackerGoal.gender||'male'):null;
+  const kgToGoal=targetW&&curW?curW-targetW:null;
+  const goalPct=targetW&&goalSW?Math.min(100,Math.max(0,((goalSW.weight-curW)/(goalSW.weight-targetW))*100)):0;
+
+  // Compare selector
+  const compareOptions=competitors.filter(c=>c.uid!==uid()).map(c=>`<option value="${c.uid}" ${c.uid===compareUid?'selected':''}>${c.displayName}</option>`).join('');
+
+  el.innerHTML=`
+    <div class="stats-strip">
+      <div class="stat-item"><div class="stat-val">${fmtPct(totalPctLost(uid()))}</div><div class="stat-lbl">Total Lost</div></div>
+      <div class="stat-item"><div class="stat-val">${wi.length}</div><div class="stat-lbl">Weigh-ins</div></div>
+      <div class="stat-item"><div class="stat-val" style="color:var(--success)">${fmtMoney(myEarnings)}</div><div class="stat-lbl">Earned</div></div>
+      <div class="stat-item"><div class="stat-val">${h2hWins}</div><div class="stat-lbl">H2H Wins</div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">📈 Weight Progress</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+        ${['7d','30d','3m','6m','1y','all'].map(p=>`<button class="pill ${personalPeriod===p?'pill-active':''}" onclick="setPeriod('${p}')">${p}</button>`).join('')}
+      </div>
+
+      <div style="position:relative;height:240px;min-height:180px"><canvas id="progress-chart-canvas" style="display:block"></canvas></div>
+      ${wi.length<2?`<div class="empty" style="margin-top:8px">Log at least 2 weigh-ins to see your chart.</div>`:''}
+    </div>
+
+    <div class="card">
+      <div class="card-label">🎯 Goal & Stats</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+        <div class="form-group"><label class="label">Target Weight (${unit})</label><input type="number" id="goal-target" class="input" step="0.1" placeholder="e.g. 75.0" value="${targetW||''}"></div>
+        <div class="form-group"><label class="label">Goal Start Date</label><input type="date" id="goal-start-date" class="input" value="${trackerGoal?.goalStartDate||''}"></div>
+        <div class="form-group"><label class="label">Height (cm)</label><input type="number" id="goal-height" class="input" step="1" placeholder="e.g. 175" value="${heightCm||''}"></div>
+        <div class="form-group"><label class="label">Gender (body fat %)</label><select id="goal-gender" class="input"><option value="">Prefer not to say</option><option value="male" ${trackerGoal?.gender==='male'?'selected':''}>Male</option><option value="female" ${trackerGoal?.gender==='female'?'selected':''}>Female</option></select></div>
+      </div>
+      <details style="margin-bottom:10px"><summary style="font-size:13px;color:var(--muted);cursor:pointer">+ Measurements for body fat estimate (optional)</summary>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px">
+          <div class="form-group"><label class="label">Waist (cm)</label><input type="number" id="goal-waist" class="input" step="0.5" value="${trackerGoal?.waistCm||''}"></div>
+          <div class="form-group"><label class="label">Neck (cm)</label><input type="number" id="goal-neck" class="input" step="0.5" value="${trackerGoal?.neckCm||''}"></div>
+          <div class="form-group"><label class="label">Hip (cm, F only)</label><input type="number" id="goal-hip" class="input" step="0.5" value="${trackerGoal?.hipCm||''}"></div>
+        </div>
+        <div style="font-size:11px;color:var(--muted)">Waist at navel, neck below larynx, hips at widest point.</div>
+      </details>
+      <button class="btn btn-primary btn-sm" onclick="saveGoal()">Save Goal</button>
+      <div id="goal-msg" style="margin-top:6px;font-size:13px"></div>
+    </div>
+
+    ${curW?`<div class="card">
+      <div class="card-label">📊 Body Stats</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px">
+        <div class="stat-item"><div class="stat-val">${curW.toFixed(1)} ${unit}</div><div class="stat-lbl">Current</div></div>
+        ${weekRate!=null?`<div class="stat-item"><div class="stat-val" style="color:${weekRate>0?'var(--success)':'var(--danger)'}">${Math.abs(weekRate).toFixed(2)} ${unit}/wk</div><div class="stat-lbl">Weekly rate</div></div>`:''}
+        ${bmi!=null?`<div class="stat-item"><div class="stat-val" style="color:${bmiCat.color}">${bmi.toFixed(1)}</div><div class="stat-lbl">BMI · ${bmiCat.label}</div></div>`:''}
+        ${projDate?`<div class="stat-item"><div class="stat-val" style="font-size:14px;color:var(--accent2)">${projDate}</div><div class="stat-lbl">Goal by</div></div>`:''}
+        ${bodyFat!=null?`<div class="stat-item"><div class="stat-val">${bodyFat}%</div><div class="stat-lbl">Body fat (Navy)</div></div>`:''}
+      </div>
+    </div>`:''}
+
+    ${targetW&&goalSW&&curW?`<div class="card">
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:13px"><span style="font-weight:500">Progress to goal</span><span style="color:var(--muted)">${kgToGoal>0?kgToGoal.toFixed(1)+' '+unit+' to go':'🎉 Goal reached!'}</span></div>
+      <div style="height:10px;background:var(--bg3);border-radius:5px;overflow:hidden"><div style="height:100%;width:${goalPct.toFixed(1)}%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:5px;transition:width .5s ease"></div></div>
+      <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:11px;color:var(--muted)"><span>Start: ${goalSW.weight.toFixed(1)} ${unit}</span><span style="font-weight:600;color:var(--accent)">${goalPct.toFixed(0)}%</span><span>Goal: ${targetW.toFixed(1)} ${unit}</span></div>
+    </div>`:''}
+
+    <div class="card">
+      <div class="card-label">🏅 Achievements</div>
+      ${(()=>{const b=calcAchievements(uid());return b.length===0?'<div class="empty">Keep logging weigh-ins to earn badges!</div>':b.map(b=>`<div style="display:flex;align-items:center;gap:12px;padding:8px 12px;background:var(--bg3);border-radius:10px;border:1px solid ${b.color}33;margin-bottom:6px"><span style="font-size:22px">${b.icon}</span><div><div style="font-weight:600;font-size:13px;color:${b.color}">${b.label}</div><div style="font-size:12px;color:var(--muted)">${b.desc}</div></div></div>`).join('');})()}
+    </div>`;
+
+  if(wi.length>=2) setTimeout(renderProgressChart, 0);
+}
+
+window.setPeriod=function(p){ personalPeriod=p; renderJourney(); };
+window.setProgMode=function(m){ progressMode=m; renderJourney(); };
+window.onProgCompareChange=function(){ compareUid=$('progress-compare-sel')?.value||null; renderProgressChart(); };
+window.saveGoal=async function(){
+  if(ghostUid){toast('Cannot save goals while in Live View mode.','danger');return;}
+  const targetWeight=parseFloat($('goal-target')?.value);
+  const heightCm=parseFloat($('goal-height')?.value)||null;
+  const goalStartDate=$('goal-start-date')?.value||null;
+  const gender=$('goal-gender')?.value||null;
+  const waistCm=parseFloat($('goal-waist')?.value)||null;
+  const neckCm=parseFloat($('goal-neck')?.value)||null;
+  const hipCm=parseFloat($('goal-hip')?.value)||null;
+  const msg=$('goal-msg');
+  if(isNaN(targetWeight)||targetWeight<=0){if(msg)msg.textContent='Please enter a valid target weight.';return;}
+  const unit=personalWeighIns.length?personalWeighIns[0].unit:'kg';
+  trackerGoal={targetWeight,heightCm,unit,goalStartDate,gender,waistCm,neckCm,hipCm};
+  await setDoc(doc(db,'users',uid(),'tracker','goal'),trackerGoal);
+  if(msg){msg.textContent='✅ Goal saved!';setTimeout(()=>msg.textContent='',3000);}
+  renderJourney();
+};
+
+function renderProgressChart() {
+  const canvas=$('progress-chart-canvas'); if(!canvas) return;
+  if(progressChart) { progressChart.destroy(); progressChart=null; }
+  let allWI=personalWeighIns.slice().sort((a,b)=>a.date.localeCompare(b.date));
+  if(allWI.length<2) return;
+
+  // Filter by period
+  const pStart=getPersonalPeriodStart();
+  let wi=pStart?allWI.filter(e=>e.date>=pStart):allWI;
+  if(wi.length<2) wi=allWI.slice(-14);
+
+  // Downsample for long periods
+  const display=(personalPeriod==='1y'||personalPeriod==='all')?downsampleWeekly(wi):wi;
+  const sw=allWI[0];
+  const MONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const usePct=personalPeriod==='3m'||personalPeriod==='6m'||personalPeriod==='1y'||personalPeriod==='all';
+
+  const labels=display.map(e=>{
+    const d=new Date(e.date+'T00:00:00');
+    return d.getDate()+' '+MONTHS[d.getMonth()]+(personalPeriod==='1y'||personalPeriod==='all'?' '+String(d.getFullYear()).slice(2):'');
+  });
+  const myData=display.map(e=>usePct?+((e.weight-sw.weight)/sw.weight*100).toFixed(2):e.weight);
+
+  // Trend line
+  const n=myData.length, xs=myData.map((_,i)=>i);
+  const sX=xs.reduce((a,b)=>a+b,0), sY=myData.reduce((a,b)=>a+b,0);
+  const sXY=xs.reduce((a,x,i)=>a+x*myData[i],0), sX2=xs.reduce((a,x)=>a+x*x,0);
+  const den=n*sX2-sX*sX, slope=den?(n*sXY-sX*sY)/den:0, intcpt=(sY-slope*sX)/n;
+  const trend=xs.map(x=>+(intcpt+slope*x).toFixed(2));
+
+  const datasets=[
+    {label:usePct?'Weight change %':'My weight',data:myData,borderColor:'#7c6af7',backgroundColor:'rgba(124,106,247,0.1)',borderWidth:2,pointRadius:display.length>30?2:3,tension:0.2,fill:false,spanGaps:true},
+    {label:'Trend',data:trend,borderColor:'#f7b26a',backgroundColor:'transparent',pointRadius:0,borderDash:[5,3],borderWidth:1.5,fill:false}
+  ];
+
+  // Compare mode — overlay competitor's line
+  if(progressMode==='compare'&&compareUid) {
+    const cName=nameFor(compareUid);
+    const cAllWI=weighInsFor(compareUid).sort((a,b)=>a.date.localeCompare(b.date));
+    if(cAllWI.length>=2) {
+      const cSW=cAllWI[0];
+      const cFiltered=pStart?cAllWI.filter(e=>e.date>=pStart):cAllWI;
+      const cDisplay=(personalPeriod==='1y'||personalPeriod==='all')?downsampleWeekly(cFiltered):cFiltered;
+      const cData=display.map(targetEntry=>{
+        if(!cDisplay.length) return null;
+        const closest=cDisplay.reduce((a,b)=>
+          Math.abs(new Date(b.date+'T00:00:00')-new Date(targetEntry.date+'T00:00:00'))<
+          Math.abs(new Date(a.date+'T00:00:00')-new Date(targetEntry.date+'T00:00:00'))?b:a
+        );
+        const daysDiff=Math.abs((new Date(closest.date+'T00:00:00')-new Date(targetEntry.date+'T00:00:00'))/(24*60*60*1000));
+        if(daysDiff>7) return null;
+        return usePct?+((closest.weight-cSW.weight)/cSW.weight*100).toFixed(2):closest.weight;
+      });
+      if(cData.some(v=>v!==null)) {
+        datasets.push({label:cName,data:cData,borderColor:'#5fd4b3',backgroundColor:'rgba(95,212,179,0.1)',borderWidth:2,pointRadius:2,tension:0.2,fill:false,spanGaps:true});
+      }
+    }
+  }
+
+  if(!window.Chart) return;
+  const yVals=myData.filter(v=>v!=null);
+  const yMin=Math.min(...yVals), yMax=Math.max(...yVals);
+  const yPad=Math.max((yMax-yMin)*0.15, usePct?0.5:1);
+
+  progressChart=new window.Chart(canvas,{type:'line',data:{labels,datasets},options:{
+    responsive:true, maintainAspectRatio:false,
+    plugins:{legend:{display:datasets.length>1,labels:{color:'#9090a0',font:{family:'DM Sans',size:11},boxWidth:12}}},
+    scales:{
+      x:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#9090a0',maxTicksLimit:6}},
+      y:{
+        min:+(yMin-yPad).toFixed(1), max:+(yMax+yPad).toFixed(1),
+        grid:{color:'rgba(255,255,255,0.05)'},
+        ticks:{color:'#9090a0',callback:v=>usePct?v.toFixed(1)+'%':v.toFixed(1)}
+      }
+    }
+  }});
+}
+
+// ─── ME — LOG ────────────────────────────────────────────────────────────────
+function renderLog() {
+  const el=$('panel-log'); if(!el) return;
+  const wi=personalWeighIns.slice().reverse();
+  const sw=wi.length?wi[wi.length-1]:null;
+
+  el.innerHTML=`
+    <div class="card">
+      <div class="card-label">Log a Weigh-in</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px;margin-bottom:8px;align-items:end">
+        <div><label class="label">Date</label><input type="date" id="wi-date" class="input" value="${ymd(new Date())}"></div>
+        <div><label class="label">Weight</label><input type="number" id="wi-weight" class="input" placeholder="${sw?sw.weight.toFixed(1):'e.g. 84.5'}" step="0.1"></div>
+        <div><label class="label">Unit</label><select id="wi-unit" class="input">${sw?`<option value="${sw.unit||'kg'}" selected>${sw.unit||'kg'}</option>`:'<option value="kg">kg</option><option value="lbs">lbs</option>'}</select></div>
+      </div>
+      <button class="btn btn-primary" onclick="submitWI()">Save Weigh-in</button>
+      <div id="wi-msg" style="margin-top:8px;font-size:13px"></div>
+    </div>
+    <div class="card">
+      <div class="card-label">History (${personalWeighIns.length})</div>
+      ${wi.length===0?`<div class="empty">No weigh-ins yet.</div>`:`
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+        <input type="date" id="hist-from" class="input" style="width:auto;flex:1" placeholder="From" onchange="histPage=0;renderLog()">
+        <input type="date" id="hist-to" class="input" style="width:auto;flex:1" placeholder="To" onchange="histPage=0;renderLog()">
+        <button class="btn btn-ghost btn-sm" onclick="clearHistFilter()">Clear</button>
+      </div>
+      <table class="data-table">
+        <thead><tr><th>Date</th><th>Week</th><th>Weight</th><th>Weekly %</th><th>Total %</th>${isSA()?'<th></th>':''}</tr></thead>
+        <tbody id="hist-body"></tbody>
+      </table>
+      <div id="hist-pagination" style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;font-size:13px;color:var(--muted)"></div>
+      `}
+    </div>`;
+  // Populate paginated history after HTML is set
+  if(wi.length>0) renderHistBody();
+}
+
+
+window.openLog=function(){
+  // Remove existing modal if any
+  const existing=document.getElementById('log-modal');
+  if(existing) existing.remove();
+
+  const modal=document.createElement('div');
+  modal.id='log-modal';
+  modal.style.cssText='position:fixed;inset:0;z-index:200;display:flex;flex-direction:column;justify-content:flex-end';
+
+  const wi=personalWeighIns;
+  const sw=wi.length?wi[0]:null;
+  const unit=sw?.unit||'kg';
+
+  modal.innerHTML=`
+    <div id="log-modal-backdrop" style="position:absolute;inset:0;background:rgba(0,0,0,0.5)" onclick="closeLogModal()"></div>
+    <div id="log-modal-sheet" style="position:relative;background:var(--bg2);border-radius:20px 20px 0 0;padding:24px 20px 40px;max-height:85vh;overflow-y:auto;transform:translateY(0);transition:transform .3s ease">
+      <div style="width:40px;height:4px;background:var(--border2);border-radius:2px;margin:0 auto 20px;cursor:grab" id="log-drag-handle"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+        <div style="font-family:Syne,sans-serif;font-weight:800;font-size:18px">⚖️ Log Weigh-in</div>
+        <button onclick="closeLogModal()" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--muted);padding:4px">×</button>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px">
+        <div>
+          <label class="label">Date</label>
+          <input type="date" id="wi-date" class="input" value="${ymd(new Date())}">
+        </div>
+        <div>
+          <label class="label">Unit</label>
+          <select id="wi-unit" class="input">
+            <option value="${unit}" selected>${unit}</option>
+            ${unit==='kg'?'<option value="lbs">lbs</option>':'<option value="kg">kg</option>'}
+          </select>
+        </div>
+      </div>
+      <div style="margin-bottom:20px">
+        <label class="label">Weight (${unit})</label>
+        <input type="number" id="wi-weight" class="input" placeholder="${sw?sw.weight.toFixed(1):'e.g. 84.5'}" step="0.1" style="font-size:28px;font-weight:700;font-family:Syne,sans-serif;text-align:center;height:64px">
+      </div>
+      <button class="btn btn-primary" style="width:100%;font-size:16px;font-family:Syne,sans-serif;font-weight:700;padding:14px" onclick="submitWI()">Save Weigh-in</button>
+      <div id="wi-msg" style="margin-top:10px;font-size:13px;text-align:center"></div>
+    </div>`;
+
+  document.body.appendChild(modal);
+
+  // Swipe down to close
+  const sheet=document.getElementById('log-modal-sheet');
+  const handle=document.getElementById('log-drag-handle');
+  let startY=0, dragging=false;
+  function onTouchStart(e){ startY=e.touches[0].clientY; dragging=true; }
+  function onTouchMove(e){ if(!dragging) return; const dy=e.touches[0].clientY-startY; if(dy>0) sheet.style.transform='translateY('+dy+'px)'; }
+  function onTouchEnd(e){ if(!dragging) return; dragging=false; const dy=e.changedTouches[0].clientY-startY; if(dy>100){closeLogModal();}else{sheet.style.transform='';} }
+  sheet.addEventListener('touchstart',onTouchStart,{passive:true});
+  sheet.addEventListener('touchmove',onTouchMove,{passive:true});
+  sheet.addEventListener('touchend',onTouchEnd);
+
+  // Focus weight field
+  setTimeout(()=>{ const w=document.getElementById('wi-weight'); if(w) w.focus(); }, 300);
+};
+
+window.closeLogModal=function(){
+  const modal=document.getElementById('log-modal');
+  if(!modal) return;
+  const sheet=document.getElementById('log-modal-sheet');
+  if(sheet){ sheet.style.transform='translateY(100%)'; }
+  setTimeout(()=>modal.remove(), 300);
+};
+
+window.submitWI=async function(){
+  if(ghostUid){toast('Cannot submit weigh-ins while in Live View mode.','danger');return;}
+  const date=$('wi-date')?.value, weight=parseFloat($('wi-weight')?.value), unit=$('wi-unit')?.value;
+  const msg=$('wi-msg');
+  if(!date||isNaN(weight)||weight<=0){if(msg)msg.textContent='Please enter a valid date and weight.';return;}
+  const week=dateToWeek(date);
+  const data={userId:uid(),date,weight,unit,week,ts:serverTimestamp()};
+  // Check for existing comp entry
+  const existing=allWeighIns.find(w=>w.userId===uid()&&w.date===date);
+  if(existing&&!isSA()){if(msg)msg.textContent='You already have an entry for this date.';return;}
+  try {
+    if(existing&&isSA()) { await updateDoc(doc(db,'competitions',currentCompId,'weighins',existing.id),data); }
+    else { await addDoc(collection(db,'competitions',currentCompId,'weighins'),data); }
+    await setDoc(doc(db,'users',uid(),'weighins',date),{date,weight,unit,ts:serverTimestamp()},{merge:true});
+    await updatePublicStats(uid());
+    if(msg){msg.textContent='✅ Saved!';setTimeout(()=>{msg.textContent='';closeLogModal();},1200);}
+  } catch(e){if(msg)msg.textContent='Error: '+e.message;}
+};
+
+
+window.clearHistFilter=function(){ const f=$('hist-from'),t=$('hist-to'); if(f)f.value=''; if(t)t.value=''; histPage=0; renderLog(); };
+function renderHistBody(){
+  const wi=personalWeighIns.slice().reverse();
+  const fromDate=$('hist-from')?.value||null, toDate=$('hist-to')?.value||null;
+  const filtered=wi.filter(e=>{ if(fromDate&&e.date<fromDate)return false; if(toDate&&e.date>toDate)return false; return true; });
+  const PAGE_SIZE=15, pages=Math.ceil(filtered.length/PAGE_SIZE)||1;
+  histPage=Math.min(histPage,pages-1);
+  const paged=filtered.slice(histPage*PAGE_SIZE,(histPage+1)*PAGE_SIZE);
+  const sw2=startWeight(uid());
+  const tbody=$('hist-body');
+  if(tbody) tbody.innerHTML=paged.map(e=>{
+    const wn=dateToWeek(e.date), wpct=wn?weeklyPctLost(uid(),wn):null;
+    const tpct=sw2&&e.weight?((sw2.weight-e.weight)/sw2.weight*100):null;
+    return `<tr>
+      <td>${fmtDate(e.date)}</td><td>${wn?'W'+wn:'—'}</td>
+      <td style="font-weight:600">${e.weight.toFixed(1)} ${e.unit||'kg'}</td>
+      <td style="color:${wpct!=null&&wpct>=0?'var(--success)':'var(--danger)'}">${wpct!=null?fmtPct(wpct):'—'}</td>
+      <td style="color:var(--accent2)">${tpct!=null?fmtPct(tpct):'—'}</td>
+      ${isSA()?`<td><button class="btn-icon" data-id="${e.id}" onclick="deleteWI(this.dataset.id)">🗑</button></td>`:''}
+    </tr>`;
+  }).join('')||'<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">No entries match your filter.</td></tr>';
+  const pg=$('hist-pagination');
+  if(pg&&filtered.length>0) pg.innerHTML=
+    `<span>Showing ${histPage*PAGE_SIZE+1}–${Math.min((histPage+1)*PAGE_SIZE,filtered.length)} of ${filtered.length}</span>`+
+    `<div style="display:flex;gap:6px">`+
+    (histPage>0?`<button class="btn btn-secondary btn-sm" onclick="histPage--;renderHistBody()">‹ Newer</button>`:'')+
+    (histPage<pages-1?`<button class="btn btn-secondary btn-sm" onclick="histPage++;renderHistBody()">Older ›</button>`:'')+
+    `</div>`;
+  else if(pg) pg.innerHTML='';
+}
+
+window.deleteWI=async function(id){
+  if(!isSA()) return;
+  if(!confirm('Delete this weigh-in?')) return;
+  await deleteDoc(doc(db,'competitions',currentCompId,'weighins',id));
+  toast('Deleted.');
+};
+
+async function updatePublicStats(memberId) {
+  const wiSnap=await getDocs(query(collection(db,'competitions',currentCompId,'weighins'),where('userId','==',memberId)));
+  const wd=wiSnap.docs.map(d=>d.data()).sort((a,b)=>a.date.localeCompare(b.date));
+  if(wd.length>=2) {
+    const pct=(wd[0].weight-wd[wd.length-1].weight)/wd[0].weight*100;
+    await updateDoc(doc(db,'competitions',currentCompId,'members',memberId),{totalPct:+pct.toFixed(4),weighInCount:wd.length,lastWeighIn:wd[wd.length-1].date,unit:wd[0].unit||'kg'});
+  } else if(wd.length===1) {
+    await updateDoc(doc(db,'competitions',currentCompId,'members',memberId),{totalPct:0,weighInCount:1,lastWeighIn:wd[0].date,unit:wd[0].unit||'kg'});
+  }
+}
+
+// ─── ME — PROFILE ────────────────────────────────────────────────────────────
+function renderProfile() {
+  const el=$('panel-profile'); if(!el) return;
+  const name=userProfile?.displayName||'';
+  const email=currentUser?.email||'';
+  const role=compMembership?.role==='admin'?'Admin':isSA()?'Super Admin':'Competitor';
+  const photo=userProfile?.photoUrl||null;
+
+  el.innerHTML=`
+    <div class="card">
+      <div class="card-label">Account</div>
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px">
+        <div id="profile-avatar-wrap" style="width:64px;height:64px;flex-shrink:0">
+          ${photo?`<img src="${photo}" style="width:64px;height:64px;border-radius:50%;object-fit:cover">`
+          :`<div style="width:64px;height:64px;border-radius:50%;background:rgba(124,106,247,0.2);color:var(--accent);display:flex;align-items:center;justify-content:center;font-family:Syne,sans-serif;font-weight:800;font-size:22px;line-height:1">${name.split(' ').map(w=>w[0]).join('').substring(0,2).toUpperCase()}</div>`}
+        </div>
+        <div>
+          <div style="font-family:Syne,sans-serif;font-size:20px;font-weight:700">${name}</div>
+          <div style="color:var(--muted);font-size:13px">${email}</div>
+          <span class="badge badge-purple" style="margin-top:4px">${role}</span>
+        </div>
+      </div>
+      <div class="form-group"><label class="label">Display Name</label><input type="text" id="profile-name" class="input" value="${name}"></div>
+      <div class="form-group"><label class="label">Photo URL</label><input type="url" id="profile-photo" class="input" placeholder="https://..." value="${userProfile?.photoUrl||''}"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button class="btn btn-primary" onclick="saveProfile()">Save</button>
+        <label style="font-size:13px;color:var(--muted);cursor:pointer">📷 Upload photo <input type="file" accept="image/*" style="display:none" onchange="uploadPhoto(this)"></label>
+      </div>
+      <div id="profile-msg" style="margin-top:8px;font-size:13px"></div>
+    </div>`;
+}
+
+window.saveProfile=async function(){
+  if(ghostUid){toast('Cannot edit profile while in Live View mode.','danger');return;}
+  const name=$('profile-name')?.value.trim(), photo=$('profile-photo')?.value.trim();
+  const msg=$('profile-msg');
+  if(!name){if(msg)msg.textContent='Name cannot be empty.';return;}
+  try {
+    await updateDoc(doc(db,'users',uid()),{displayName:name,...(photo?{photoUrl:photo}:{})});
+    await updateProfile(currentUser,{displayName:name,...(photo?{photoURL:photo}:{})});
+    userProfile={...userProfile,displayName:name,...(photo?{photoUrl:photo}:{})};
+    if(msg){msg.textContent='✅ Saved!';setTimeout(()=>{msg.textContent='';closeLogModal();},1200);}
+  } catch(e){if(msg)msg.textContent='Error: '+e.message;}
+};
+window.uploadPhoto=async function(input){
+  const file=input.files[0]; if(!file) return;
+  try {
+    const r=ref(store,`profile/${uid()}/${Date.now()}_${file.name}`);
+    await uploadBytes(r,file);
+    const url=await getDownloadURL(r);
+    await updateDoc(doc(db,'users',uid()),{photoUrl:url});
+    await updateProfile(currentUser,{photoURL:url});
+    userProfile={...userProfile,photoUrl:url};
+    renderProfile();
+    toast('Photo updated!');
+  } catch(e){toast('Upload failed: '+e.message,'danger');}
+};
+
+// ─── SOCIAL — FEED ───────────────────────────────────────────────────────────
+function renderFeed() {
+  const el=$('panel-feed'); if(!el) return;
+  el.innerHTML=`
+    <div class="card">
+      <textarea id="feed-input" class="input" rows="3" placeholder="Share something with the group..." style="resize:none;margin-bottom:8px"></textarea>
+      <button class="btn btn-primary btn-sm" onclick="postFeed()">Post</button>
+    </div>
+    ${feedPosts.length===0?`<div class="empty">No posts yet. Be the first!</div>`
+    :feedPosts.map(p=>{
+      const isMe=p.uid===uid();
+      const ts=p.ts?.toDate?p.ts.toDate().toLocaleDateString():'';
+      return `<div class="card" style="${isMe?'border-color:rgba(124,106,247,0.3)':''}">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+          ${avatar(p.displayName||'?',32)}
+          <div>
+            <div style="font-weight:600;font-size:13px">${p.displayName||'Unknown'}${isMe?' <span class="tag">you</span>':''}</div>
+            <div style="font-size:11px;color:var(--muted)">${ts}</div>
+          </div>
+          ${isMe?`<button class="btn-icon" style="margin-left:auto" data-id="${p.id}" onclick="deleteFeedPost(this.dataset.id)">×</button>`:''}
+        </div>
+        <p style="font-size:14px;line-height:1.6">${p.text}</p>
+      </div>`;
+    }).join('')}`;
+}
+window.postFeed=async function(){ const text=$('feed-input')?.value.trim(); if(!text) return; await addDoc(collection(db,'feedPosts'),{text,uid:uid(),displayName:userProfile?.displayName||'',compId:currentCompId,ts:serverTimestamp()}); if($('feed-input'))$('feed-input').value=''; };
+window.deleteFeedPost=async function(id){ if(!confirm('Delete post?')) return; await deleteDoc(doc(db,'feedPosts',id)); };
+
+// ─── SOCIAL — FRIENDS ────────────────────────────────────────────────────────
+function renderFriends() {
+  const el=$('panel-friends'); if(!el) return;
+  el.innerHTML=`
+    ${friendRequests.length>0?`<div class="card"><div class="card-label">Friend Requests (${friendRequests.length})</div>
+      ${friendRequests.map(r=>`<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+        ${avatar(r.fromName||'?',32)}
+        <span style="flex:1">${r.fromName||'Unknown'}</span>
+        <button class="btn btn-success btn-sm" data-id="${r.id}" onclick="respondReq(this.dataset.id,true)">✓</button>
+        <button class="btn btn-danger btn-sm" data-id="${r.id}" onclick="respondReq(this.dataset.id,false)">×</button>
+      </div>`).join('')}
+    </div>`:''}
+    <div class="card">
+      <div class="card-label">Friends (${friends.length})</div>
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <input id="friend-search" class="input" placeholder="Search by name..." style="flex:1">
+        <button class="btn btn-primary btn-sm" onclick="searchFriends()">Search</button>
+      </div>
+      <div id="friend-results"></div>
+      ${friends.length===0?`<div class="empty">No friends yet. Search to add someone.</div>`
+      :friends.map(f=>{ const fUid=f.users.find(u=>u!==uid()); const fName=f.displayNames?.[fUid]||'Unknown'; return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+        ${avatar(fName,32)}
+        <span style="flex:1">${fName}</span>
+        <button class="btn btn-ghost btn-sm" data-uid="${fUid}" data-name="${fName}" onclick="startDM(this.dataset.uid,this.dataset.name)">💬</button>
+        <button class="btn btn-danger btn-sm" data-id="${f.id}" onclick="removeFriend(this.dataset.id)">Remove</button>
+      </div>`; }).join('')}
+    </div>`;
+}
+window.searchFriends=async function(){
+  const q=($('friend-search')?.value||'').trim().toLowerCase();
+  if(!q) return;
+  const snap=await getDocs(collection(db,'users'));
+  const results=snap.docs.map(d=>({id:d.id,...d.data()})).filter(u=>u.id!==uid()&&((u.displayName||'').toLowerCase().includes(q)||(u.email||'').toLowerCase().includes(q)));
+  const el=$('friend-results');
+  if(!el) return;
+  el.innerHTML=results.length===0?`<div class="empty">No users found.</div>`:results.map(u=>{
+    const alreadyFriend=friends.some(f=>f.users.includes(u.id));
+    return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0">
+      ${avatar(u.displayName||'?',32)}
+      <span style="flex:1">${u.displayName||u.email}</span>
+      ${alreadyFriend?'<span class="tag">Friend</span>':`<button class="btn btn-primary btn-sm" data-uid="${u.id}" data-name="${encodeURIComponent(u.displayName||u.email||'')}" onclick="sendFriendReq(this.dataset.uid,decodeURIComponent(this.dataset.name))">+ Add</button>`}
+    </div>`;
+  }).join('');
+};
+window.sendFriendReq=async function(toUid,toName){
+  await addDoc(collection(db,'friendships'),{users:[uid(),toUid],from:uid(),fromName:userProfile?.displayName||'',to:toUid,toName,status:'pending',ts:serverTimestamp()});
+  toast('Friend request sent!');
+};
+window.respondReq=async function(reqId,accept){
+  if(accept) { await updateDoc(doc(db,'friendships',reqId),{status:'accepted'}); toast('Friend added!'); }
+  else       { await deleteDoc(doc(db,'friendships',reqId)); }
+};
+window.removeFriend=async function(reqId){ if(!confirm('Remove friend?')) return; await deleteDoc(doc(db,'friendships',reqId)); };
+
+// ─── SOCIAL — MESSAGES ───────────────────────────────────────────────────────
+function renderMessages() {
+  const el=$('panel-messages'); if(!el) return;
+  if(activeDMId) { renderDMThread(); return; }
+  if(activeGroupId) { renderGroupThread(); return; }
+  el.innerHTML=`
+    <div class="card" style="display:flex;flex-direction:column;height:calc(100vh - 200px);min-height:400px;max-height:700px">
+      <div class="card-label" style="flex-shrink:0">Messages</div>
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-shrink:0">
+        <button class="pill ${currentChatTab==='dms'?'pill-active':''}" onclick="setMsgTab('dms')">Direct</button>
+        <button class="pill ${currentChatTab==='groups'?'pill-active':''}" onclick="setMsgTab('groups')">Groups</button>
+        <button class="pill ${currentChatTab==='chat'?'pill-active':''}" onclick="setMsgTab('chat')">Comp Chat</button>
+      </div>
+      <div id="msg-tab-content" style="display:flex;flex-direction:column;flex:1;min-height:0">${renderMsgTabContent()}</div>
+    </div>`;
+}
+function renderMsgTabContent() {
+  if(currentChatTab==='chat') {
+    const CHANNELS=['general','recipes','tips','motivation'];
+    if(!window._chatChannel) window._chatChannel='general';
+    const filtered=chatMessages.filter(m=>m.channel===window._chatChannel||(window._chatChannel==='general'&&!m.channel));
+    // Build chat HTML using a function so variables are in scope (not inside template literal)
+    function buildChatMessages(messages) {
+      if(!messages.length) return '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--muted);font-size:13px">No messages yet. Say something!</div>';
+      return messages.map(function(m) {
+        var isMe = m.uid === uid();
+        var name = m.displayName || (competitors.find(function(c){return c.uid===m.uid;})?.displayName) || 'Unknown';
+        var ts = m.ts && m.ts.toDate ? m.ts.toDate().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '';
+        return '<div style="display:flex;flex-direction:column;align-items:'+(isMe?'flex-end':'flex-start')+';margin-bottom:12px">'
+          +(!isMe?'<div style="font-size:11px;font-weight:600;color:var(--accent);margin-bottom:4px;padding:0 4px">'+name+'</div>':'')
+          +'<div style="max-width:75%;background:'+(isMe?'var(--accent)':'var(--bg2)')+';color:'+(isMe?'#fff':'var(--text)')+';border-radius:'+(isMe?'18px 18px 4px 18px':'18px 18px 18px 4px')+';padding:10px 14px;font-size:14px;line-height:1.5;word-break:break-word;box-shadow:0 1px 4px rgba(0,0,0,0.15)">'+m.text+'</div>'
+          +'<div style="font-size:10px;color:var(--muted);margin-top:3px;padding:0 6px">'+(isMe?'You · ':'')+ts+'</div>'
+          +'</div>';
+      }).join('');
+    }
+    return `
+      <div style="display:flex;gap:4px;overflow-x:auto;padding-bottom:8px;scrollbar-width:none;flex-shrink:0">
+        ${CHANNELS.map(c=>`<button class="pill ${window._chatChannel===c?'pill-active':''}" onclick="setChatChannel('${c}')" style="flex-shrink:0">${c.charAt(0).toUpperCase()+c.slice(1)}</button>`).join('')}
+      </div>
+      <div id="chat-messages" style="flex:1;overflow-y:auto;border:1px solid var(--border);border-radius:12px;background:var(--bg3);padding:12px;min-height:0">
+        ${buildChatMessages(filtered)}
+      </div>
+      <div style="display:flex;gap:8px;padding-top:8px;flex-shrink:0">
+        <input class="input" id="chat-input" placeholder="Message #${window._chatChannel}..." style="flex:1" onkeydown="if(event.key==='Enter')postChat()">
+        <button class="btn btn-primary btn-sm" onclick="postChat()">Send</button>
+      </div>`;
+  }
+  if(currentChatTab==='dms') {
+    return conversations.length===0?`<div class="empty">No direct messages. Start one from your friends list.</div>`:conversations.map(c=>{
+      const other=c.participants.find(p=>p!==uid()); const name=c.names?.[other]||'Unknown';
+      return `<div class="msg-row" onclick="activeDMId='${c.id}';renderMessages()">
+        ${avatar(name,36)}<div style="flex:1;min-width:0"><div style="font-weight:600">${name}</div><div style="font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.lastMsg?.text||''}</div></div>
+      </div>`;
+    }).join('');
+  }
+  if(currentChatTab==='groups') {
+    return `${groupChats.map(g=>`<div class="msg-row" onclick="activeGroupId='${g.id}';renderMessages()">
+      <div class="group-avatar">${g.name?.[0]||'G'}</div>
+      <div style="flex:1;min-width:0"><div style="font-weight:600">${g.name||'Group'}</div><div style="font-size:12px;color:var(--muted)">${g.members?.length||0} members</div></div>
+    </div>`).join('')}
+    <div style="margin-top:12px"><input class="input" id="new-group-name" placeholder="New group name..." style="margin-bottom:6px"><button class="btn btn-primary btn-sm" onclick="createGroup()">Create Group</button></div>`;
+  }
+  return '';
+}
+window.setMsgTab=function(tab){ currentChatTab=tab; renderMessages(); };
+window.postChat=async function(){ const text=$('chat-input')?.value.trim(); if(!text) return; await addDoc(collection(db,'competitions',currentCompId,'chat'),{text,uid:uid(),displayName:userProfile?.displayName||'',channel:window._chatChannel||'general',ts:serverTimestamp()}); if($('chat-input'))$('chat-input').value=''; setTimeout(scrollChatToBottom,100); };
+function scrollChatToBottom(){ const el=$('chat-messages'); if(el) el.scrollTop=el.scrollHeight; }
+window.setChatChannel=function(ch){ window._chatChannel=ch; renderMessages(); setTimeout(scrollChatToBottom,50); };
+function renderDMThread() {
+  const el=$('panel-messages'); if(!el) return;
+  const conv=conversations.find(c=>c.id===activeDMId); if(!conv) { activeDMId=null; renderMessages(); return; }
+  const other=conv.participants.find(p=>p!==uid()); const name=conv.names?.[other]||'Unknown';
+  el.innerHTML=`<div class="card"><div style="display:flex;align-items:center;gap:10px;margin-bottom:12px"><button class="btn-icon" onclick="activeDMId=null;renderMessages()">←</button><strong>${name}</strong></div>
+    <div id="dm-msgs" style="max-height:300px;overflow-y:auto;margin-bottom:8px">${(conv.messages||[]).map(m=>{ const isMe=m.uid===uid(); return `<div style="display:flex;justify-content:${isMe?'flex-end':'flex-start'};margin-bottom:6px"><div style="background:${isMe?'rgba(124,106,247,0.2)':'var(--bg3)'};border-radius:10px;padding:7px 11px;max-width:75%;font-size:14px">${m.text}</div></div>`; }).join('')}</div>
+    <div style="display:flex;gap:8px"><input class="input" id="dm-input" placeholder="Message..." style="flex:1" onkeydown="if(event.key==='Enter')sendDM()"><button class="btn btn-primary btn-sm" onclick="sendDM()">Send</button></div>
+  </div>`;
+}
+window.sendDM=async function(){ const text=$('dm-input')?.value.trim(); if(!activeDMId||!text) return; const msg={uid:uid(),text,ts:new Date().toISOString()}; await updateDoc(doc(db,'conversations',activeDMId),{messages:[...(conversations.find(c=>c.id===activeDMId)?.messages||[]),msg],lastMsg:{uid:uid(),text}}); if($('dm-input'))$('dm-input').value=''; };
+window.startDM=async function(toUid,toName){ const existing=conversations.find(c=>c.participants.includes(toUid)&&c.participants.includes(uid())); if(existing){activeDMId=existing.id;showTab('social');showSub('social','messages');return;} const ref=await addDoc(collection(db,'conversations'),{participants:[uid(),toUid],names:{[uid()]:userProfile?.displayName||'',[toUid]:toName},messages:[],ts:serverTimestamp()}); activeDMId=ref.id; showTab('social'); showSub('social','messages'); };
+function renderGroupThread() {
+  const el=$('panel-messages'); if(!el) return;
+  const g=groupChats.find(c=>c.id===activeGroupId); if(!g) { activeGroupId=null; renderMessages(); return; }
+  el.innerHTML=`<div class="card"><div style="display:flex;align-items:center;gap:10px;margin-bottom:12px"><button class="btn-icon" onclick="activeGroupId=null;renderMessages()">←</button><strong>${g.name}</strong></div>
+    <div id="group-msgs" style="max-height:300px;overflow-y:auto;margin-bottom:8px">${(g.messages||[]).map(m=>{ const isMe=m.uid===uid(); return `<div style="display:flex;justify-content:${isMe?'flex-end':'flex-start'};margin-bottom:6px"><div style="background:${isMe?'rgba(124,106,247,0.2)':'var(--bg3)'};border-radius:10px;padding:7px 11px;max-width:75%;font-size:14px"><div style="font-size:10px;color:var(--muted);margin-bottom:2px">${m.name||''}</div>${m.text}</div></div>`; }).join('')}</div>
+    <div style="display:flex;gap:8px"><input class="input" id="group-input" placeholder="Message..." style="flex:1" onkeydown="if(event.key==='Enter')sendGroup()"><button class="btn btn-primary btn-sm" onclick="sendGroup()">Send</button></div>
+  </div>`;
+}
+window.sendGroup=async function(){ const text=$('group-input')?.value.trim(); if(!activeGroupId||!text) return; const msg={uid:uid(),name:userProfile?.displayName||'',text,ts:new Date().toISOString()}; const g=groupChats.find(c=>c.id===activeGroupId); await updateDoc(doc(db,'groupChats',activeGroupId),{messages:[...(g?.messages||[]),msg],lastMsg:{uid:uid(),text}}); if($('group-input'))$('group-input').value=''; };
+window.createGroup=async function(){ const name=$('new-group-name')?.value.trim(); if(!name) return; const ref=await addDoc(collection(db,'groupChats'),{name,members:[uid()],messages:[],ts:serverTimestamp()}); activeGroupId=ref.id; showSub('social','messages'); };
+
+// ─── SETTINGS — PREFERENCES ──────────────────────────────────────────────────
+function renderPrefs() {
+  const el=$('panel-prefs'); if(!el) return;
+  el.innerHTML=`
+    <div id="admin-note-banner" style="display:none;background:rgba(124,106,247,0.08);border:1px solid rgba(124,106,247,0.25);border-radius:12px;padding:16px;margin-bottom:16px"></div>
+    <div class="sa-only admin-only" style="display:none;margin-bottom:16px">
+      <button class="btn" style="width:100%;background:rgba(247,178,106,0.1);border:1px solid rgba(247,178,106,0.25);color:var(--accent3);padding:12px 16px;border-radius:10px;font-weight:600;text-align:left" onclick="showSub('settings','admin')">⚙️ Competition Settings →</button>
+    </div>
+    <div class="card">
+      <div class="card-label">App</div>
+      <div class="pref-row"><div><div style="font-weight:500">Appearance</div><div style="font-size:12px;color:var(--muted)">Light or dark theme</div></div><button class="btn btn-secondary" onclick="toggleTheme()" id="theme-btn">🌙 Dark</button></div>
+      <div class="pref-row"><div><div style="font-weight:500">Switch Competition</div><div style="font-size:12px;color:var(--muted)">Join a different competition</div></div><button class="btn btn-secondary" onclick="switchComp()">⇄ Switch</button></div>
+      <div class="pref-row"><div><div style="font-weight:500">Sign Out</div></div><button class="btn btn-danger" onclick="doSignOut()">⏻ Sign Out</button></div>
+    </div>
+    <div class="card">
+      <div class="card-label">🔗 Invite People</div>
+      <div class="invite-box"><div id="invite-code-disp" style="font-family:DM Mono,monospace;font-size:24px;font-weight:700;letter-spacing:4px">${currentComp?.inviteCode||'—'}</div></div>
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button class="btn btn-teal btn-sm" onclick="copyLink()">🔗 Copy Invite Link</button>
+        <button class="btn btn-secondary btn-sm" onclick="copyCode()">📋 Copy Code</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-label">🐛 Report a Bug</div>
+      <div class="form-group"><label class="label">What went wrong?</label><input id="bug-title" class="input" placeholder="e.g. Leaderboard not updating"></div>
+      <div class="form-group"><label class="label">Details (optional)</label><textarea id="bug-desc" class="input" rows="3" style="resize:none"></textarea></div>
+      <div class="form-group"><label class="label">Severity</label><select id="bug-sev" class="input"><option value="minor">Minor</option><option value="major">Major</option><option value="critical">Critical</option></select></div>
+      <button class="btn btn-primary btn-sm" onclick="submitBug()">Submit</button>
+      <div id="bug-msg" style="margin-top:8px;font-size:13px"></div>
+    </div>`;
+  updateAdminUI();
+  updateThemeBtn();
+}
+
+window.copyLink=function(){ navigator.clipboard.writeText('https://timmilatte.github.io/weighbet/?join='+(currentComp?.inviteCode||'')).then(()=>toast('Invite link copied!')); };
+window.copyCode=function(){ navigator.clipboard.writeText(currentComp?.inviteCode||'').then(()=>toast('Code copied!')); };
+window.submitBug=async function(){
+  const title=$('bug-title')?.value.trim();
+  if(!title){if($('bug-msg'))$('bug-msg').textContent='Please describe the issue.';return;}
+  await addDoc(collection(db,'bugReports'),{title,description:$('bug-desc')?.value.trim()||'',severity:$('bug-sev')?.value||'minor',status:'open',userId:uid(),userName:userProfile?.displayName||currentUser?.email,compId:currentCompId,compName:currentComp?.name||null,appVersion:APP_VERSION,ts:serverTimestamp()});
+  if($('bug-msg')){$('bug-msg').textContent='✅ Submitted — thank you!';setTimeout(()=>{ if($('bug-msg'))$('bug-msg').textContent=''; },4000);}
+  if($('bug-title'))$('bug-title').value='';
+  if($('bug-desc'))$('bug-desc').value='';
+};
+
+// ─── SETTINGS — ADMIN (competition organisers only) ──────────────────────────
+function renderAdminSettings() {
+  const el=$('panel-admin'); if(!el) return;
+  if(!isAdmin()) { el.innerHTML=`<div class="empty">Admin access required.</div>`; return; }
+
+  el.innerHTML=`
+    <div class="card">
+      <div class="card-label">⚙️ Competition Settings</div>
+      <div class="form-group"><label class="label">Name</label><input id="admin-name" class="input" value="${currentComp?.name||''}"></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px">
+        <div class="form-group"><label class="label">Start Date</label><input type="date" id="admin-start" class="input" value="${currentComp?.startDate||''}"></div>
+        <div class="form-group"><label class="label">Weeks</label><input type="number" id="admin-weeks" class="input" value="${currentComp?.weeks||8}" min="1" max="52"></div>
+        <div class="form-group"><label class="label">Buy-in ($)</label><input type="number" id="admin-buyin" class="input" value="${currentComp?.buyin||0}" min="0"></div>
+      </div>
+      <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+      <div id="settings-msg" style="margin-top:8px;font-size:13px"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">👥 Competitors (${competitors.length})</div>
+      <div style="margin-bottom:10px;font-size:13px;color:var(--muted)">Matchups are generated automatically when the competition starts. <br>Set a start date above and save — matchups will generate at the start of day 1.</div>
+      <button class="btn btn-teal btn-sm" onclick="generateMatchupsManual()">🎲 Generate Matchups Now</button>
+      <button class="btn btn-secondary btn-sm" style="margin-left:6px" onclick="recalcStats()">🔄 Recalculate Stats</button>
+      <div id="matchup-msg" style="margin-top:8px;font-size:13px"></div>
+      <div id="admin-comp-list" style="margin-top:16px">${competitors.map(c=>`
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+          ${avatar(c.displayName||'?',32)}
+          <div style="flex:1">
+            <div style="font-weight:500;font-size:13px">${c.displayName||'Unknown'}</div>
+            <div style="font-size:11px;color:var(--muted)">${c.role||'competitor'} · ${c.playerType==='free'?'Free':'Paying'}</div>
+          </div>
+          <button class="btn btn-ghost btn-sm" data-uid="${c.uid}" data-type="${c.playerType||'paying'}" onclick="toggleType(this.dataset.uid,this.dataset.type)">${c.playerType==='free'?'→ Paying':'→ Free'}</button>
+          <button class="btn btn-ghost btn-sm" data-uid="${c.uid}" data-role="${c.role||'competitor'}" onclick="toggleRole(this.dataset.uid,this.dataset.role)">${c.role==='admin'?'Demote':'Promote'}</button>
+          ${c.uid!==uid()?`<button class="btn btn-danger btn-sm" data-uid="${c.uid}" data-name="${encodeURIComponent(c.displayName||'')}" onclick="removeMember(this.dataset.uid,decodeURIComponent(this.dataset.name))">Remove</button>`:''}
+        </div>`).join('')}
+      </div>
+    </div>
+
+    ${isCompOver()?`<div class="card" style="border-color:rgba(124,106,247,0.3)">
+      <div class="card-label">🏁 Competition Ended</div>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:12px">Archive this competition to remove it from the active list.</p>
+      <button class="btn btn-secondary btn-sm" onclick="archiveComp()">📦 Archive Competition</button>
+    </div>`:''}`;
+}
+
+window.saveSettings=async function(){
+  const name=$('admin-name')?.value.trim(), start=$('admin-start')?.value, weeks=parseInt($('admin-weeks')?.value)||8, buyin=parseFloat($('admin-buyin')?.value)||0;
+  const msg=$('settings-msg');
+  if(!name){if(msg)msg.textContent='Competition name required.';return;}
+  await updateDoc(doc(db,'competitions',currentCompId),{name,startDate:start||null,weeks,buyin});
+  currentComp={...currentComp,name,startDate:start||null,weeks,buyin};
+  if(msg){msg.textContent='✅ Saved!';setTimeout(()=>msg.textContent='',3000);}
+};
+window.generateMatchupsManual=async function(){
+  const msg=$('matchup-msg');
+  if(msg) msg.textContent='⏳ Generating...';
+  const schedule=buildRoundRobin();
+  if(schedule.length===0){if(msg)msg.textContent='Not enough competitors to generate matchups.';return;}
+  // Delete existing matchups first
+  const ex=await getDocs(collection(db,'competitions',currentCompId,'matchups'));
+  const batch=writeBatch(db);
+  ex.docs.forEach(d=>batch.delete(d.ref));
+  schedule.forEach(m=>batch.set(doc(collection(db,'competitions',currentCompId,'matchups')),{...m,createdAt:serverTimestamp()}));
+  await batch.commit();
+  if(msg){msg.textContent=`✅ Generated ${schedule.length} matchups.`;setTimeout(()=>msg.textContent='',4000);}
+};
+window.recalcStats=async function(){
+  const msg=$('matchup-msg');
+  if(msg) msg.textContent='⏳ Recalculating...';
+  for(const c of competitors) await updatePublicStats(c.uid);
+  if(msg){msg.textContent='✅ Stats recalculated.';setTimeout(()=>msg.textContent='',3000);}
+};
+window.toggleType=async function(memberId,current){ await updateDoc(doc(db,'competitions',currentCompId,'members',memberId),{playerType:current==='free'?'paying':'free'}); };
+window.toggleRole=async function(memberId,current){ await updateDoc(doc(db,'competitions',currentCompId,'members',memberId),{role:current==='admin'?'competitor':'admin'}); };
+window.removeMember=async function(memberId,name){
+  if(!confirm('Remove '+name+' from this competition?')) return;
+  const batch=writeBatch(db);
+  batch.delete(doc(db,'competitions',currentCompId,'members',memberId));
+  batch.delete(doc(db,'competitionMembers',currentCompId+'_'+memberId));
+  const ws=await getDocs(query(collection(db,'competitions',currentCompId,'weighins'),where('userId','==',memberId)));
+  ws.docs.forEach(d=>batch.delete(d.ref));
+  await batch.commit();
+  toast(name+' removed.');
+};
+window.archiveComp=async function(){
+  if(!confirm('Archive this competition?')) return;
+  await updateDoc(doc(db,'competitions',currentCompId),{archived:true,archivedAt:serverTimestamp()});
+  const ms=await getDocs(query(collection(db,'competitionMembers'),where('compId','==',currentCompId)));
+  const batch=writeBatch(db); ms.docs.forEach(d=>batch.update(d.ref,{archived:true})); await batch.commit();
+  toast('Competition archived.'); await switchComp();
+};
+
+// ─── THEME ───────────────────────────────────────────────────────────────────
+let darkMode=localStorage.getItem('wb-theme')!=='light';
+function applyTheme() { document.documentElement.classList.toggle('light',!darkMode); updateThemeBtn(); }
+function updateThemeBtn() { const b=$('theme-btn'); if(b) b.textContent=darkMode?'☀️ Light':'🌙 Dark'; }
+window.toggleTheme=function(){ darkMode=!darkMode; localStorage.setItem('wb-theme',darkMode?'dark':'light'); applyTheme(); updateThemeBtn(); };
+applyTheme();
+
+// ─── SUPER ADMIN PANEL ───────────────────────────────────────────────────────
+// Kept in user app for SA users — a separate admin portal (index.html) also exists.
+// SA panel lets SA enter any competition in ghost mode to see exactly what any user sees.
+let saAllComps=[], saAllUsers=[], saCurrentTab='overview', saGhostUid=null, saViewingComp=null;
+const SA_TABS=['overview','competitions','users','bugs'];
+
+window.goToSAPanel=async function(){
+  stopCompListeners();
+  currentCompId=null;currentComp=null;compMembership=null;
+  competitors=[];allWeighIns=[];matchups=[];matchupsLoaded=false;
+  saCurrentTab='overview'; saAllComps=[]; saAllUsers=[];
+  showScreen('screen-super-admin');
+  await loadSAData();
+};
+window.exitSAPanel=async function(){
+  showScreen('screen-select');
+  await loadMyComps();
+  renderSelectScreen();
+};
+window.switchSATab=async function(tab){
+  saCurrentTab=tab;
+  document.querySelectorAll('[data-satab]').forEach(el=>el.classList.toggle('active',el.dataset.satab===tab));
+  if(tab==='competitions'&&!saAllComps.length) await loadSAComps();
+  if(tab==='users'&&!saAllUsers.length) await loadSAUsers();
+  if(tab==='bugs') await loadSABugs();
+  renderSAPanel();
+};
+async function loadSAData() {
+  await loadSAComps(); renderSAPanel();
+}
+async function loadSAComps() {
+  const idx=await getDocs(collection(db,'competitionMembers'));
+  const ids=[...new Set(idx.docs.map(d=>d.data().compId).filter(Boolean))];
+  saAllComps=await Promise.all(ids.map(async id=>{
+    try { const s=await getDoc(doc(db,'competitions',id)); if(!s.exists()) return null; return {id,...s.data()}; } catch(e){return null;}
+  }));
+  saAllComps=saAllComps.filter(Boolean).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+}
+async function loadSAUsers() {
+  const s=await getDocs(collection(db,'users'));
+  saAllUsers=s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(a.displayName||'').localeCompare(b.displayName||''));
+}
+let saBugs=[];
+async function loadSABugs() {
+  const s=await getDocs(query(collection(db,'bugReports'),orderBy('ts','desc')));
+  saBugs=s.docs.map(d=>({id:d.id,...d.data()}));
+}
+function renderSAPanel() {
+  const el=$('sa-content'); if(!el) return;
+  if(saCurrentTab==='overview') {
+    el.innerHTML=`<h3 style="font-family:Syne,sans-serif;font-weight:800;font-size:18px;margin-bottom:20px">Platform Overview</h3>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:24px">
+        ${saCard('🏆','Competitions',saAllComps.length)}${saCard('👥','Users',saAllUsers.length||'—')}${saCard('▶️','Active',saAllComps.filter(c=>!c.archived&&!c.suspended).length)}
+      </div>
+      <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted);font-weight:600;margin-bottom:10px">Recent Competitions</div>
+      ${saAllComps.slice(0,8).map(c=>saCompRow(c)).join('')}`;
+  } else if(saCurrentTab==='competitions') {
+    el.innerHTML=`<input id="sa-comp-search" class="input" placeholder="Search competitions..." oninput="filterSAComps()" style="margin-bottom:12px">
+      <div id="sa-comp-list">${saAllComps.map(c=>saCompRow(c)).join('')}</div>`;
+  } else if(saCurrentTab==='users') {
+    el.innerHTML=`<input id="sa-user-search" class="input" placeholder="Search users..." oninput="filterSAUsers()" style="margin-bottom:12px">
+      <div id="sa-user-list">${saAllUsers.map(u=>`<div style="display:flex;align-items:center;gap:10px;padding:10px;background:var(--bg2);border-radius:8px;margin-bottom:6px">
+        ${avatar(u.displayName||'?',32)}<div style="flex:1"><div style="font-weight:500">${u.displayName||'Unknown'}</div><div style="font-size:12px;color:var(--muted)">${u.email||''}</div></div>
+        <span class="badge ${u.role==='owner'?'badge-owner':u.role==='superAdmin'?'badge-admin':'badge-muted'}">${u.role||'user'}</span>
+      </div>`).join('')}</div>`;
+  } else if(saCurrentTab==='bugs') {
+    const open=saBugs.filter(b=>b.status!=='resolved');
+    el.innerHTML=`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px"><strong>${open.length} open bugs</strong><button class="btn btn-secondary btn-sm" onclick="loadSABugs().then(()=>renderSAPanel())">🔄 Refresh</button></div>
+      ${saBugs.map(b=>{ const r=b.status==='resolved'; return `<div style="background:var(--bg2);border-radius:10px;padding:14px;margin-bottom:8px;opacity:${r?0.6:1}">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px"><strong>${b.title||'Untitled'}</strong><span class="badge ${b.severity==='critical'?'badge-danger':b.severity==='major'?'badge-warning':'badge-muted'}">${b.severity||'minor'}</span></div>
+        <div style="font-size:13px;color:var(--muted);margin-bottom:8px">${b.description||''}</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">👤 ${b.userName||'?'} · ${b.compName||''}</div>
+        <div style="display:flex;gap:6px">${!r?`<button class="btn btn-success btn-sm" data-id="${b.id}" onclick="saBugResolve(this.dataset.id)">✅ Resolve</button>`:`<button class="btn btn-warning btn-sm" data-id="${b.id}" onclick="saBugReopen(this.dataset.id)">↩ Reopen</button>`}
+        <button class="btn btn-danger btn-sm" data-id="${b.id}" onclick="saBugDelete(this.dataset.id)">🗑</button></div>
+      </div>`; }).join('')}`;
+  }
+}
+function saCard(icon,label,val) { return `<div style="background:var(--bg2);border-radius:12px;padding:16px"><div style="font-size:22px;margin-bottom:8px">${icon}</div><div style="font-family:Syne,sans-serif;font-weight:800;font-size:24px">${val}</div><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted);margin-top:4px">${label}</div></div>`; }
+function saCompRow(c) {
+  return `<div style="background:var(--bg2);border-radius:8px;padding:12px 14px;margin-bottom:6px;display:flex;align-items:center;gap:10px">
+    <div style="flex:1"><div style="font-weight:600">${c.name||'Unnamed'}</div><div style="font-size:12px;color:var(--muted)">${c.startDate||'No start'} · ${c.weeks||8} wks · ${c.buyin?'$'+c.buyin+' buy-in':'free'}</div></div>
+    <div style="display:flex;gap:4px">
+      <button class="btn btn-primary btn-sm" data-id="${c.id}" onclick="saEnterComp(this.dataset.id,'admin')">👁 Admin</button>
+      <button class="btn btn-teal btn-sm" data-id="${c.id}" onclick="saPickUser(this.dataset.id)">🎭 View as</button>
+      <button class="btn btn-success btn-sm" data-id="${c.id}" onclick="saRecalc(this.dataset.id,this)">🔄</button>
+      ${!c.suspended?`<button class="btn btn-danger btn-sm" data-id="${c.id}" onclick="saSuspend(this.dataset.id,true)">🚫</button>`:`<button class="btn btn-success btn-sm" data-id="${c.id}" onclick="saSuspend(this.dataset.id,false)">✅</button>`}
+    </div>
+  </div>`;
+}
+window.filterSAComps=function(){ const q=($('sa-comp-search')?.value||'').toLowerCase(); const el=$('sa-comp-list'); if(el) el.innerHTML=saAllComps.filter(c=>(c.name||'').toLowerCase().includes(q)).map(c=>saCompRow(c)).join(''); };
+window.filterSAUsers=function(){ const q=($('sa-user-search')?.value||'').toLowerCase(); const el=$('sa-user-list'); if(!el) return; el.innerHTML=saAllUsers.filter(u=>(u.displayName||'').toLowerCase().includes(q)||(u.email||'').toLowerCase().includes(q)).map(u=>`<div style="display:flex;align-items:center;gap:10px;padding:10px;background:var(--bg2);border-radius:8px;margin-bottom:6px">${avatar(u.displayName||'?',32)}<div style="flex:1"><div style="font-weight:500">${u.displayName||'Unknown'}</div><div style="font-size:12px;color:var(--muted)">${u.email||''}</div></div><span class="badge ${u.role==='owner'?'badge-owner':u.role==='superAdmin'?'badge-admin':'badge-muted'}">${u.role||'user'}</span></div>`).join(''); };
+window.saBugResolve=async function(id){ await updateDoc(doc(db,'bugReports',id),{status:'resolved',resolvedAt:serverTimestamp()}); await loadSABugs(); renderSAPanel(); };
+window.saBugReopen=async function(id){ await updateDoc(doc(db,'bugReports',id),{status:'open',resolvedAt:null}); await loadSABugs(); renderSAPanel(); };
+window.saBugDelete=async function(id){ if(!confirm('Delete?')) return; await deleteDoc(doc(db,'bugReports',id)); await loadSABugs(); renderSAPanel(); };
+window.saBugSendNote=async function(id){ const ta=$('sa-bug-note-'+id); const note=ta?.value.trim(); if(!note) return; await updateDoc(doc(db,'bugReports',id),{adminNote:note,adminNoteRead:false,adminNoteTs:serverTimestamp()}); await loadSABugs(); renderSAPanel(); };
+window.saBugClearNote=async function(id){ if(!confirm('Remove this note?')) return; await updateDoc(doc(db,'bugReports',id),{adminNote:null,adminNoteRead:null,adminNoteTs:null}); await loadSABugs(); renderSAPanel(); };
+window.saEnterComp=async function(compId,mode,ghostUid){
+  saViewingComp=compId; saGhostUid=ghostUid||null;
+  currentCompId=compId;
+  const s=await getDoc(doc(db,'competitions',compId));
+  currentComp=s.data();
+  matchupsLoaded=false; matchups=[];
+  stopCompListeners(); startCompListeners();
+  showScreen('screen-app');
+  updateAdminUI();
+  showTab('compete');
+  // Show ghost bar if viewing as specific user
+  const gb=$('ghost-bar');
+  if(gb) { gb.style.display='flex'; $('ghost-comp-name').textContent=currentComp?.name||compId; $('ghost-mode').textContent=ghostUid?'(Viewing as user)':mode==='admin'?'(Admin View)':''; }
+};
+window.saPickUser=async function(compId){
+  const ms=await getDocs(collection(db,'competitions',compId,'members'));
+  const members=ms.docs.map(d=>({uid:d.id,...d.data()})).sort((a,b)=>(a.displayName||'').localeCompare(b.displayName||''));
+  const overlay=document.createElement('div');
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:999;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.innerHTML=`<div style="background:var(--bg2);border-radius:16px;padding:24px;width:100%;max-width:360px;max-height:80vh;overflow-y:auto">
+    <div style="font-family:Syne,sans-serif;font-weight:800;font-size:16px;margin-bottom:16px">🎭 View as a user</div>
+    ${members.map(m=>`<button data-uid="${m.uid}" data-cid="${compId}" onclick="saEnterComp(this.dataset.cid,'user',this.dataset.uid);this.closest('div[style]').remove()"
+      style="width:100%;display:flex;align-items:center;gap:10px;background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:9px;padding:10px 12px;margin-bottom:6px;cursor:pointer;text-align:left">
+      ${avatar(m.displayName||'?',32)}
+      <div style="flex:1"><div style="font-size:14px;font-weight:500">${m.displayName||'Unknown'}</div><div style="font-size:11px;color:var(--muted)">${m.playerType==='free'?'Free':'Paying'} · ${m.role||'competitor'}</div></div>
+      <span style="color:var(--muted)">→</span>
+    </button>`).join('')}
+    <button onclick="this.closest('div[style]').remove()" style="width:100%;padding:8px;background:none;border:1px solid var(--border);border-radius:8px;color:var(--muted);cursor:pointer;margin-top:4px">Cancel</button>
+  </div>`;
+  overlay.addEventListener('click',e=>{ if(e.target===overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+};
+window.saRecalc=async function(compId,btn){
+  if(btn){btn.textContent='⏳';btn.disabled=true;}
+  const ms=await getDocs(collection(db,'competitions',compId,'members'));
+  for(const m of ms.docs) {
+    const ws=await getDocs(query(collection(db,'competitions',compId,'weighins'),where('userId','==',m.id)));
+    const wd=ws.docs.map(d=>d.data()).sort((a,b)=>a.date.localeCompare(b.date));
+    if(wd.length>=2) await updateDoc(doc(db,'competitions',compId,'members',m.id),{totalPct:+((wd[0].weight-wd[wd.length-1].weight)/wd[0].weight*100).toFixed(4),weighInCount:wd.length,lastWeighIn:wd[wd.length-1].date});
+  }
+  if(btn){btn.textContent='✅';setTimeout(()=>{btn.textContent='🔄';btn.disabled=false;},2000);}
+  toast('Stats recalculated.');
+};
+window.saSuspend=async function(compId,suspend){ if(!confirm((suspend?'Suspend':'Unsuspend')+'?')) return; await updateDoc(doc(db,'competitions',compId),{suspended:suspend}); await loadSAComps(); renderSAPanel(); };
+window.exitGhost=function(){ const gb=$('ghost-bar'); if(gb) gb.style.display='none'; saGhostUid=null; goToSAPanel(); };
+
+window.enterComp=enterComp;
+window.joinByCode=joinByCode;
+window.joinComp=joinComp;
+window.renderSelectScreen=renderSelectScreen;
+</script>
+
+<style>
+/* ─── CSS CUSTOM PROPERTIES ──────────────────────────────── */
+:root{
+  --bg:#0a0a0e;--bg2:#111118;--bg3:#1a1a24;--bg4:#222232;
+  --border:rgba(255,255,255,0.07);--border2:rgba(255,255,255,0.12);
+  --text:#f0f0f4;--muted:#6b6b80;
+  --accent:#7c6af7;--accent2:#f7b26a;--accent3:#5fd4b3;
+  --success:#5fd4b3;--danger:#e05252;--warning:#f7b26a;--owner:#c084fc;
+  --nav-h:56px;--mob-nav-h:62px;
+}
+.light{
+  --bg:#f5f5f8;--bg2:#ffffff;--bg3:#f0f0f5;--bg4:#e8e8f0;
+  --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.12);
+  --text:#111118;--muted:#6b6b80;
+}
+
+/* ─── RESET ──────────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
+img{max-width:100%}
+p{line-height:1.6}
+
+/* ─── LAYOUT ─────────────────────────────────────────────── */
+/* App shell */
+#screen-app{display:none;grid-template-columns:220px 1fr;grid-template-rows:var(--nav-h) 1fr;min-height:100vh}
+@media(max-width:768px){
+  #screen-app{grid-template-columns:1fr;grid-template-rows:var(--nav-h) 1fr}
+  .sidebar{display:none!important}
+  .main{padding-bottom:calc(var(--mob-nav-h) + 16px)!important}
+  .mob-nav{display:flex!important}
+}
+
+/* Top nav */
+.topnav{grid-column:1/-1;background:var(--bg2);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:16px;position:sticky;top:0;z-index:40;height:var(--nav-h)}
+.topnav-logo{font-family:Syne,sans-serif;font-weight:800;font-size:17px}
+.topnav-logo span{color:var(--accent)}
+.topnav-right{margin-left:auto;display:flex;align-items:center;gap:10px}
+
+/* Sidebar */
+.sidebar{background:var(--bg2);border-right:1px solid var(--border);padding:16px 0;position:sticky;top:var(--nav-h);height:calc(100vh - var(--nav-h));overflow-y:auto;display:flex;flex-direction:column}
+.nav-section{padding:6px 16px 4px;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);font-weight:600}
+.nav-item{display:flex;align-items:center;gap:10px;padding:10px 16px;cursor:pointer;color:var(--muted);font-size:13.5px;font-weight:500;border:none;background:none;width:100%;text-align:left;transition:all .15s;position:relative;border-radius:0}
+.nav-item:hover{color:var(--text);background:rgba(255,255,255,0.03)}
+.nav-item.active{color:var(--accent);background:rgba(124,106,247,0.08)}
+.nav-item.active::before{content:'';position:absolute;left:0;top:4px;bottom:4px;width:3px;background:var(--accent);border-radius:0 2px 2px 0}
+.nav-bottom{padding:12px 16px;border-top:1px solid var(--border);margin-top:auto}
+.nav-user{display:flex;align-items:center;gap:10px}
+.nav-avatar{width:32px;height:32px;border-radius:50%;background:rgba(124,106,247,0.2);color:var(--accent);display:flex;align-items:center;justify-content:center;font-family:Syne,sans-serif;font-weight:800;font-size:12px;flex-shrink:0}
+.nav-name{font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nav-sub{font-size:11px;color:var(--muted)}
+
+/* Main */
+.main{padding:0 24px 20px;overflow-y:auto;height:calc(100vh - var(--nav-h))}
+@media(max-width:768px){.main{padding:0 14px 16px}}
+.tab-panel{display:none}
+
+/* Mobile nav */
+.mob-nav{display:none;position:fixed;bottom:0;left:0;right:0;z-index:40;background:var(--bg2);border-top:1px solid var(--border);padding:4px 0 env(safe-area-inset-bottom,4px)}
+.mob-nav-item{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 2px;border:none;background:none;cursor:pointer;color:var(--muted);font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.3px}
+.mob-nav-item .mni{font-size:20px;line-height:1}
+.mob-nav-item.active{color:var(--accent)}
+
+/* ─── SUBTABS ────────────────────────────────────────────── */
+.subtab-bar{display:flex;gap:4px;overflow-x:auto;padding:12px 0 10px;margin-bottom:16px;scrollbar-width:none;position:sticky;top:0;z-index:10;background:var(--bg);box-shadow:0 8px 0 0 var(--bg),0 1px 0 0 var(--border)}
+.subtab-bar::-webkit-scrollbar{display:none}
+.subtab{padding:7px 14px;border-radius:99px;border:none;background:var(--bg3);color:var(--muted);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap;transition:all .15s}
+.subtab.active{background:rgba(124,106,247,0.15);color:var(--accent)}
+
+/* ─── COMPONENTS ─────────────────────────────────────────── */
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:16px 18px;margin-bottom:14px}
+.card-highlight{border-color:rgba(124,106,247,0.3)}
+.card-bl{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:14px 16px;margin-bottom:10px}
+.card-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);margin-bottom:10px}
+.card-over{text-align:center;border-color:rgba(95,212,179,0.3);padding:24px;margin-bottom:14px}
+.card-over h3{font-family:Syne,sans-serif;font-weight:800;font-size:18px;margin:8px 0 4px}
+.card-over p{color:var(--muted);font-size:13px}
+
+/* Stats strip */
+.stats-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+@media(max-width:480px){.stats-strip{grid-template-columns:repeat(2,1fr)}}
+.stat-item{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:14px 12px;text-align:center}
+.stat-val{font-family:Syne,sans-serif;font-weight:800;font-size:20px;margin-bottom:2px}
+.stat-lbl{font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted);font-weight:600}
+
+/* Matchup cards */
+.matchup-vs{display:flex;align-items:center;gap:12px;padding:12px 0;justify-content:center}
+.matchup-player{display:flex;flex-direction:column;align-items:center;gap:6px;flex:1;min-width:0;transition:opacity .2s}
+.matchup-player.dim{opacity:0.4}
+.mp-name{font-weight:600;font-size:13px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.mp-pct{font-family:Syne,sans-serif;font-weight:800;font-size:16px;color:var(--muted)}
+.mp-pct.win{color:var(--success)}
+.vs-sep{font-size:11px;font-weight:800;color:var(--muted);flex-shrink:0}
+.matchup-note{font-size:12px;color:var(--muted);text-align:center;padding-top:8px;border-top:1px solid var(--border);margin-top:4px}
+.matchup-note.note-win{color:var(--success)}
+.matchup-note.note-loss{color:var(--danger)}
+.avatar-bye{width:44px;height:44px;border-radius:50%;background:var(--bg3);color:var(--muted);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600}
+.week-nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;padding:10px 16px;background:var(--bg2);border-radius:12px;border:1px solid var(--border)}
+
+/* Leaderboard */
+.lb-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border)}
+.lb-row:last-child{border-bottom:none}
+.lb-row.lb-me{background:rgba(124,106,247,0.05);border-radius:8px;padding:10px 8px;margin:2px -8px}
+.lb-rank{font-family:Syne,sans-serif;font-weight:700;font-size:15px;width:28px;text-align:center;color:var(--muted)}
+.lb-name{flex:1;font-weight:500;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lb-pct{font-family:Syne,sans-serif;font-weight:700;font-size:15px;color:var(--accent2)}
+
+/* Prizes */
+.prize-pill{display:flex;align-items:center;justify-content:space-between;gap:12px;border-radius:14px;padding:16px 18px;margin-bottom:10px}
+.pp-gold{background:rgba(247,215,106,0.07);border:1px solid rgba(247,215,106,0.3)}
+.pp-silver{background:rgba(192,192,192,0.06);border:1px solid rgba(192,192,192,0.3)}
+.pp-accent{background:rgba(124,106,247,0.07);border:1px solid rgba(124,106,247,0.25)}
+.pp-teal{background:rgba(95,212,179,0.07);border:1px solid rgba(95,212,179,0.25)}
+.pp-label{font-weight:600;font-size:14px;margin-bottom:2px}
+.pp-sub{font-size:12px;color:var(--muted)}
+.pp-val{font-family:Syne,sans-serif;font-weight:800;font-size:22px;white-space:nowrap}
+.pp-gold .pp-label{color:#f7d76a}.pp-gold .pp-val{color:#f7d76a}
+.pp-silver .pp-label{color:#c0c0c0}.pp-silver .pp-val{color:#c0c0c0}
+.pp-accent .pp-label{color:var(--accent)}.pp-accent .pp-val{color:var(--accent)}
+.pp-teal .pp-label{color:var(--accent2)}.pp-teal .pp-val{color:var(--accent2)}
+.earn-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border)}
+.earn-row:last-child{border-bottom:none}
+.earn-row.earn-me{background:rgba(124,106,247,0.05);border-radius:8px;padding:10px 8px;margin:2px -8px}
+
+/* Invite */
+.invite-box{background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:16px;text-align:center;letter-spacing:4px;font-family:'DM Mono',monospace;font-size:22px;font-weight:700}
+
+/* Forms */
+.input{width:100%;background:var(--bg3);border:1px solid var(--border2);border-radius:9px;color:var(--text);padding:10px 14px;font-family:'DM Sans',sans-serif;font-size:14px;outline:none;transition:border-color .15s;display:block}
+.input:focus{border-color:var(--accent)}
+select.input{cursor:pointer}
+.label{display:block;font-size:12px;font-weight:500;color:var(--muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:0.4px}
+.form-group{margin-bottom:14px}
+.pref-row{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border)}
+.pref-row:last-child{border-bottom:none}
+
+/* Buttons */
+.btn{padding:9px 18px;border-radius:9px;border:none;cursor:pointer;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:500;transition:opacity .15s}
+.btn:hover{opacity:0.85}
+.btn:disabled{opacity:0.5;cursor:not-allowed}
+.btn-primary{background:rgba(124,106,247,0.2);color:var(--accent)}
+.btn-teal{background:rgba(95,212,179,0.15);color:var(--success)}
+.btn-success{background:rgba(95,212,179,0.15);color:var(--success)}
+.btn-danger{background:rgba(224,82,82,0.15);color:var(--danger)}
+.btn-warning{background:rgba(247,178,106,0.15);color:var(--warning)}
+.btn-secondary{background:var(--bg3);color:var(--text);border:1px solid var(--border2)}
+.btn-ghost{background:none;color:var(--muted)}
+.btn-sm{padding:5px 11px;font-size:12px;border-radius:7px}
+.btn-icon{background:none;border:none;cursor:pointer;color:var(--muted);font-size:18px;padding:4px;border-radius:6px}
+.btn-icon:hover{background:var(--bg3);color:var(--text)}
+.btn-full{width:100%;padding:12px;border-radius:10px;border:none;cursor:pointer;font-family:Syne,sans-serif;font-weight:700;font-size:15px;background:var(--accent);color:#fff;transition:opacity .15s}
+.btn-full:hover{opacity:0.9}
+
+/* Auth screens */
+#screen-auth,#screen-reset,#screen-select{min-height:100vh;display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;background:radial-gradient(ellipse at 30% 20%,rgba(124,106,247,0.08) 0%,transparent 60%)}
+#screen-auth .auth-inner,#screen-reset .auth-inner,#screen-select .auth-inner{width:100%;max-width:420px;background:var(--bg2);border:1px solid var(--border2);border-radius:20px;padding:32px}
+.auth-logo{text-align:center;margin-bottom:24px}
+.auth-logo-title{font-family:Syne,sans-serif;font-weight:800;font-size:24px;letter-spacing:-0.5px;margin-top:8px}
+.auth-tabs{display:flex;background:var(--bg3);border-radius:10px;padding:3px;margin-bottom:20px;gap:2px}
+.auth-tab{flex:1;padding:8px;text-align:center;cursor:pointer;border-radius:8px;font-size:13px;font-weight:500;color:var(--muted);border:none;background:none}
+.auth-tab.active{background:var(--bg4);color:var(--text)}
+.auth-err{background:rgba(224,82,82,0.1);border:1px solid rgba(224,82,82,0.25);border-radius:8px;padding:10px 12px;font-size:13px;color:var(--danger);margin-bottom:12px;display:none}
+.comp-row{width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:8px;cursor:pointer;text-align:left;transition:border-color .15s}
+.comp-row:hover{border-color:var(--accent)}
+.section-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);margin-bottom:8px}
+
+/* SA Panel screen */
+#screen-super-admin{display:none;min-height:100vh;background:var(--bg)}
+.sa-header{background:var(--bg2);border-bottom:1px solid var(--border);padding:0 20px;height:56px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:40}
+.sa-tabs{display:flex;gap:2px;overflow-x:auto;flex:1}
+.sa-tab{padding:16px 18px;background:none;border:none;color:var(--muted);font-size:13px;font-weight:500;cursor:pointer;border-bottom:2px solid transparent;font-family:'DM Sans',sans-serif;white-space:nowrap}
+.sa-tab.active{color:var(--text);border-bottom-color:var(--accent)}
+.sa-content{max-width:1000px;margin:0 auto;padding:20px 16px}
+
+/* Ghost mode banner */
+#ghost-banner~#screen-app .main{padding-top:calc(40px + 20px)}
+#ghost-banner~#screen-app .topnav{top:40px}
+#ghost-banner~.mob-nav{bottom:0}
+
+/* Ghost bar */
+#ghost-bar{display:none;position:fixed;top:0;left:0;right:0;z-index:9999;background:rgba(247,178,106,0.95);color:#1a1a1a;padding:8px 16px;align-items:center;gap:12px;font-size:13px;font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+
+/* Misc */
+.badge{display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:600}
+.badge-purple{background:rgba(124,106,247,0.2);color:var(--accent)}
+.badge-teal{background:rgba(95,212,179,0.15);color:var(--success)}
+.badge-muted{background:rgba(255,255,255,0.06);color:var(--muted)}
+.badge-admin{background:rgba(247,178,106,0.2);color:var(--accent2)}
+.badge-owner{background:rgba(192,132,252,0.2);color:var(--owner)}
+.badge-danger{background:rgba(224,82,82,0.15);color:var(--danger)}
+.badge-warning{background:rgba(247,178,106,0.15);color:var(--warning)}
+.badge-success{background:rgba(95,212,179,0.15);color:var(--success)}
+.tag{display:inline-block;background:rgba(124,106,247,0.15);color:var(--accent);border-radius:99px;font-size:10px;font-weight:600;padding:1px 6px;margin-left:4px}
+.pill{padding:6px 14px;border-radius:99px;border:none;background:var(--bg3);color:var(--muted);font-size:12px;font-weight:500;cursor:pointer;transition:all .15s;white-space:nowrap}
+.pill-active{background:rgba(124,106,247,0.15);color:var(--accent)}
+.empty{text-align:center;padding:32px 16px;color:var(--muted);font-size:14px}
+.data-table{width:100%;border-collapse:collapse;font-size:13px}
+.data-table th{text-align:left;padding:7px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)}
+.data-table td{padding:9px 10px;border-bottom:1px solid var(--border)}
+.data-table tr:last-child td{border-bottom:none}
+.data-table tr:hover td{background:rgba(255,255,255,0.02)}
+.info-box{text-align:center;padding:32px 20px}
+.info-box h2{font-family:Syne,sans-serif;font-weight:800;font-size:22px;margin:12px 0 8px}
+.info-box p{color:var(--muted);margin-bottom:20px}
+.msg-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer}
+.group-avatar{width:36px;height:36px;border-radius:50%;background:rgba(247,178,106,0.15);color:var(--accent2);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;flex-shrink:0}
+.nav-badge{background:var(--danger);color:#fff;border-radius:99px;font-size:10px;padding:1px 6px;font-weight:700;display:inline-block}
+
+/* Week carousel */
+/* Week carousel — ported from original working version */
+#week-carousel-wrap{position:relative;margin:12px 0 4px}
+#week-carousel-window{
+  position:absolute;top:50%;left:50%;
+  transform:translate(-50%,-50%);
+  width:64px;height:64px;border-radius:14px;
+  border:2.5px solid var(--accent);
+  box-shadow:0 0 0 4px rgba(124,106,247,0.12);
+  pointer-events:none;z-index:3;
+}
+#week-carousel-wrap::before,#week-carousel-wrap::after{
+  content:'';position:absolute;top:0;bottom:0;width:60px;pointer-events:none;z-index:2;
+}
+#week-carousel-wrap::before{left:0;background:linear-gradient(to right,var(--bg2) 20%,transparent)}
+#week-carousel-wrap::after{right:0;background:linear-gradient(to left,var(--bg2) 20%,transparent)}
+#week-carousel{
+  display:flex;overflow-x:scroll;scroll-snap-type:x mandatory;
+  -webkit-overflow-scrolling:touch;scrollbar-width:none;-ms-overflow-style:none;padding:10px 0;
+}
+#week-carousel::-webkit-scrollbar{display:none}
+.week-carousel-slide{flex-shrink:0;width:80px;scroll-snap-align:center;display:flex;align-items:center;justify-content:center;}
+.week-carousel-item{width:60px;height:60px;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:'Syne',sans-serif;font-weight:600;font-size:15px;cursor:pointer;color:var(--muted);transition:color .15s,font-size .15s,font-weight .15s;user-select:none;border-radius:12px;}
+.week-carousel-item.active{color:var(--accent);font-weight:800;font-size:19px;}
+.week-carousel-item.current-week{color:var(--accent2);font-weight:700;text-decoration:underline;text-underline-offset:3px;}
+.week-carousel-item.active.current-week{color:var(--accent);font-weight:800;font-size:19px;text-decoration:none;}
+.week-carousel-item:hover:not(.active){color:var(--text)}
+
+/* Compact match rows */
+.compact-match{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:10px 14px;margin-bottom:8px;overflow:hidden;display:block;width:100%;box-sizing:border-box}
+.compact-match-me{border-color:rgba(124,106,247,0.35);background:rgba(124,106,247,0.04)}
+.cm-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);margin-bottom:8px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cm-row{display:grid;grid-template-columns:1fr 28px 1fr;align-items:center;gap:4px;width:100%;box-sizing:border-box}
+.cm-player{display:flex;align-items:center;gap:5px;min-width:0;overflow:hidden}
+.cm-player-right{flex-direction:row-reverse}
+.cm-name{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.cm-player-right .cm-name{text-align:right}
+.cm-pct{font-size:12px;font-weight:700;flex-shrink:0;white-space:nowrap}
+.cm-vs{font-size:10px;font-weight:800;color:var(--muted);text-align:center;flex-shrink:0}
+.cm-note{font-size:11px;color:var(--muted);margin-top:6px;padding-top:6px;border-top:1px solid var(--border);text-align:center;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cm-note-win{color:var(--success)}
+.cm-note-loss{color:var(--danger)}
+
+/* Toast */
+.toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:10px 20px;border-radius:10px;font-size:14px;font-weight:500;z-index:9999;white-space:nowrap;display:none}
+.toast-success{background:rgba(95,212,179,0.15);border:1px solid rgba(95,212,179,0.3);color:var(--success)}
+.toast-danger{background:rgba(224,82,82,0.1);border:1px solid rgba(224,82,82,0.3);color:var(--danger)}
+</style>
+
+<!-- Chart.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+</head>
+<body>
+
+<!-- ─── AUTH SCREEN ──────────────────────────────────────────────────────── -->
+<div id="screen-auth">
+  <div class="auth-inner">
+    <div class="auth-logo">
+      <div style="font-size:40px">⚖️</div>
+      <div class="auth-logo-title">Weigh<span style="color:var(--accent)">Bet</span></div>
+    </div>
+    <div class="auth-tabs">
+      <button class="auth-tab active" id="auth-tab-login" onclick="showAuthTab('login')">Sign In</button>
+      <button class="auth-tab" id="auth-tab-reg" onclick="showAuthTab('register')">Register</button>
+    </div>
+    <div class="auth-err" id="auth-err"></div>
+    <div id="login-form">
+      <div class="form-group"><label class="label">Email</label><input type="email" id="auth-email" class="input" placeholder="you@example.com" onkeydown="if(event.key==='Enter')doLogin()"></div>
+      <div class="form-group"><label class="label">Password</label><input type="password" id="auth-pass" class="input" placeholder="Password" onkeydown="if(event.key==='Enter')doLogin()"></div>
+      <button class="btn-full" onclick="doLogin()">Sign In →</button>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="btn btn-secondary" style="flex:1" onclick="doGoogle()">G Google</button>
+        <button class="btn btn-ghost btn-sm" onclick="doForgotPw()">Forgot password?</button>
+      </div>
+    </div>
+    <div id="reg-form" style="display:none">
+      <div class="form-group"><label class="label">Name</label><input type="text" id="reg-name" class="input" placeholder="Your name"></div>
+      <div class="form-group"><label class="label">Email</label><input type="email" id="reg-email" class="input" placeholder="you@example.com"></div>
+      <div class="form-group"><label class="label">Password</label><input type="password" id="reg-pass" class="input" placeholder="Min 6 characters"></div>
+      <button class="btn-full" onclick="doRegister()">Create Account →</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── PASSWORD RESET ────────────────────────────────────────────────────── -->
+<div id="screen-reset" style="display:none">
+  <div class="auth-inner">
+    <div class="auth-logo"><div style="font-size:40px">🔑</div><div class="auth-logo-title">Reset Password</div></div>
+    <input type="hidden" id="reset-oob">
+    <div class="form-group"><label class="label">New Password</label><input type="password" id="reset-pass" class="input" placeholder="Min 6 characters"></div>
+    <button class="btn-full" onclick="doConfirmReset()">Set New Password</button>
+  </div>
+</div>
+
+<!-- ─── COMPETITION SELECT ────────────────────────────────────────────────── -->
+<div id="screen-select" style="display:none">
+  <div class="auth-inner" id="select-content"></div>
+</div>
+
+<!-- ─── APP SHELL ─────────────────────────────────────────────────────────── -->
+<div id="screen-app">
+
+  <!-- Top nav -->
+  <header class="topnav">
+    <div class="topnav-logo">Weigh<span>Bet</span></div>
+    <div class="topnav-right">
+      <span id="nav-admin-badge" class="badge badge-admin admin-only" style="display:none">Admin</span>
+      <div class="nav-avatar" id="top-avatar">?</div>
+    </div>
+  </header>
+
+  <!-- Sidebar (desktop) -->
+  <nav class="sidebar">
+    <div class="nav-section">Competition</div>
+    <button class="nav-item active" data-tab="compete" onclick="showTab('compete')"><span>🏆</span>Compete</button>
+    <button class="nav-item" data-tab="me" onclick="showTab('me')"><span>👤</span>Me</button>
+    <button class="nav-item" data-tab="social" onclick="showTab('social')"><span>💬</span>Social <span id="friend-req-badge" class="nav-badge" style="display:none;margin-left:auto"></span><span id="unread-badge" class="nav-badge" style="display:none;background:var(--danger)"></span></button>
+    <button class="nav-item" data-tab="settings" onclick="showTab('settings')"><span>⚙️</span>Preferences</button>
+    <div class="nav-bottom">
+      <div class="sa-only" style="display:none;margin-bottom:8px">
+        <button class="btn btn-sm" style="width:100%;background:rgba(247,178,106,0.1);border:1px solid rgba(247,178,106,0.25);color:var(--accent2);text-align:left" onclick="goToSAPanel()">⚙️ Super Admin Panel</button>
+      </div>
+      <div class="nav-user">
+        <div class="nav-avatar" id="side-avatar">?</div>
+        <div style="min-width:0">
+          <div class="nav-name" id="side-name"></div>
+          <div class="nav-sub" id="side-comp"></div>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Main content -->
+  <main class="main">
+
+    <!-- Compete tab -->
+    <div id="tab-compete" class="tab-panel">
+      <div class="subtab-bar">
+        <button class="subtab active" data-maintab="compete" data-subtab="overview" onclick="showSub('compete','overview')">🏠 Overview</button>
+        <button class="subtab" data-maintab="compete" data-subtab="weekly" onclick="showSub('compete','weekly')">⚔️ H2H</button>
+        <button class="subtab" data-maintab="compete" data-subtab="prizes" onclick="showSub('compete','prizes')">💰 Prizes</button>
+      </div>
+      <div data-subpanel="overview" data-maintab="compete" id="panel-overview"></div>
+      <div data-subpanel="prizes" data-maintab="compete" id="panel-prizes" style="display:none"></div>
+      <div data-subpanel="weekly" data-maintab="compete" id="panel-weekly" style="display:none"></div>
+    </div>
+
+    <!-- Me tab -->
+    <div id="tab-me" class="tab-panel" style="display:none">
+      <div class="subtab-bar">
+        <button class="subtab active" data-maintab="me" data-subtab="journey" onclick="showSub('me','journey')">📈 Journey</button>
+
+        <button class="subtab" data-maintab="me" data-subtab="profile" onclick="showSub('me','profile')">👤 Profile</button>
+      </div>
+      <div data-subpanel="journey" data-maintab="me" id="panel-journey"></div>
+      <div data-subpanel="log" data-maintab="me" id="panel-log" style="display:none"></div>
+      <div data-subpanel="profile" data-maintab="me" id="panel-profile" style="display:none"></div>
+    </div>
+
+    <!-- Social tab -->
+    <div id="tab-social" class="tab-panel" style="display:none">
+      <div class="subtab-bar">
+        <button class="subtab active" data-maintab="social" data-subtab="feed" onclick="showSub('social','feed')">📣 Feed</button>
+        <button class="subtab" data-maintab="social" data-subtab="friends" onclick="showSub('social','friends')">👥 Friends</button>
+        <button class="subtab" data-maintab="social" data-subtab="messages" onclick="showSub('social','messages')">💬 Messages</button>
+      </div>
+      <div data-subpanel="feed" data-maintab="social" id="panel-feed"></div>
+      <div data-subpanel="friends" data-maintab="social" id="panel-friends" style="display:none"></div>
+      <div data-subpanel="messages" data-maintab="social" id="panel-messages" style="display:none"></div>
+    </div>
+
+    <!-- Settings tab -->
+    <div id="tab-settings" class="tab-panel" style="display:none">
+      <div class="subtab-bar">
+        <button class="subtab active" data-maintab="settings" data-subtab="prefs" onclick="showSub('settings','prefs')">⚙️ Preferences</button>
+        <button class="subtab admin-only" data-maintab="settings" data-subtab="admin" style="display:none" onclick="showSub('settings','admin')">🏆 Competition</button>
+      </div>
+      <div data-subpanel="prefs" data-maintab="settings" id="panel-prefs"></div>
+      <div data-subpanel="admin" data-maintab="settings" id="panel-admin" style="display:none"></div>
+    </div>
+
+  </main>
+</div>
+
+<!-- Mobile bottom nav -->
+<nav class="mob-nav">
+  <button class="mob-nav-item active" data-tab="compete" onclick="showTab('compete')"><span class="mni">🏆</span>Compete</button>
+  <button class="mob-nav-item" data-tab="me" onclick="showTab('me')"><span class="mni">👤</span>Me</button>
+  <button class="mob-nav-item" data-tab="social" onclick="showTab('social')"><span class="mni">💬</span>Social</button>
+  <button class="mob-nav-item" data-tab="settings" onclick="showTab('settings')"><span class="mni">⚙️</span>Prefs</button>
+</nav>
+
+<!-- Floating weigh-in button -->
+<button id="float-btn" onclick="openLog()"
+  style="display:none;position:fixed;bottom:88px;right:20px;z-index:39;width:62px;height:62px;border-radius:50%;background:var(--accent);color:#fff;border:none;font-size:28px;cursor:pointer;box-shadow:0 6px 20px rgba(124,106,247,0.5);align-items:center;justify-content:center">⚖️</button>
+
+<!-- Ghost mode banner — shown when SA opens app via Live View from admin portal -->
+<div id="ghost-banner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;background:rgba(224,82,82,0.95);color:#fff;padding:8px 16px;align-items:center;gap:12px;font-size:13px;font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,0.3)">
+  <span>👁 Live View</span>
+  <span style="flex:1">Viewing as: <strong id="ghost-banner-name"></strong> <span id="ghost-banner-comp" style="opacity:0.7;font-size:11px;margin-left:6px"></span></span>
+  <span style="font-size:11px;font-weight:400;opacity:0.8">You see exactly what they see</span>
+  <button onclick="exitGhostMode()" style="background:rgba(255,255,255,0.2);border:none;border-radius:7px;padding:5px 14px;font-size:12px;font-weight:700;cursor:pointer;color:#fff">✕ Exit</button>
+</div>
+
+<!-- Ghost bar (SA only, shown when viewing as a user) -->
+<div id="ghost-bar" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;background:rgba(247,178,106,0.95);color:#1a1a1a;padding:8px 16px;align-items:center;gap:12px;font-size:13px;font-weight:600">
+  <span>👻 Ghost</span>
+  <span id="ghost-comp-name" style="flex:1"></span>
+  <span id="ghost-mode" style="opacity:0.7;font-size:11px"></span>
+  <button onclick="exitGhost()" style="background:rgba(0,0,0,0.15);border:none;border-radius:6px;padding:4px 12px;font-size:12px;font-weight:600;cursor:pointer">✕ Exit</button>
+</div>
+
+<!-- Toast -->
+<div id="toast" class="toast"></div>
+
+<!-- ─── SUPER ADMIN PANEL ──────────────────────────────────────────────────── -->
+<div id="screen-super-admin">
+  <div class="sa-header">
+    <div style="font-family:Syne,sans-serif;font-weight:800;font-size:16px;margin-right:16px">Weigh<span style="color:var(--accent)">Bet</span> <span style="font-size:10px;color:var(--accent2);letter-spacing:1px;text-transform:uppercase;vertical-align:middle">SA</span></div>
+    <div class="sa-tabs">
+      <button class="sa-tab active" data-satab="overview" onclick="switchSATab('overview')">📊 Overview</button>
+      <button class="sa-tab" data-satab="competitions" onclick="switchSATab('competitions')">🏆 Competitions</button>
+      <button class="sa-tab" data-satab="users" onclick="switchSATab('users')">👥 Users</button>
+      <button class="sa-tab" data-satab="bugs" onclick="switchSATab('bugs')">🐛 Bugs</button>
+    </div>
+    <div style="display:flex;gap:8px;margin-left:auto;flex-shrink:0">
+      <button class="btn btn-teal btn-sm" onclick="exitSAPanel()">← My Comps</button>
+      <button class="btn btn-danger btn-sm" onclick="doSignOut()">Sign Out</button>
+    </div>
+  </div>
+  <div class="sa-content" id="sa-content"></div>
+</div>
+
+<script>
+// After auth fires and we enter a comp, populate nav user info
+function updateNavUser() {
+  const name = window.userProfile?.displayName || window.currentUser?.email || '';
+  const comp = window.currentComp?.name || '';
+  const initials = name.split(' ').map(w=>w[0]).join('').substring(0,2).toUpperCase();
+  const a1 = document.getElementById('top-avatar');
+  const a2 = document.getElementById('side-avatar');
+  const sn = document.getElementById('side-name');
+  const sc = document.getElementById('side-comp');
+  if(a1) a1.textContent = initials||'?';
+  if(a2) a2.textContent = initials||'?';
+  if(sn) sn.textContent = name;
+  if(sc) sc.textContent = comp;
+}
+// Patch refreshPage to also update nav
+const _origRefresh = window.refreshPage;
+window.refreshPage = function() {
+  updateNavUser();
+  if(_origRefresh) _origRefresh();
+};
+</script>
+</body>
+</html>
          signInWithEmailAndPassword, createUserWithEmailAndPassword,
          signOut, sendPasswordResetEmail, updateProfile,
          confirmPasswordReset, verifyPasswordResetCode }                        from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
