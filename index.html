@@ -633,8 +633,29 @@ function startCompListeners() {
     refreshPage();
   }));
   // Chat
-  unsubs.push(onSnapshot(query(collection(db,'competitions',currentCompId,'chat'),orderBy('ts','asc')),snap=>{
+  unsubs.push(onSnapshot(query(collection(db,'competitions',currentCompId,'chat'),orderBy('ts','asc')),async snap=>{
     chatMessages=snap.docs.map(d=>({id:d.id,...d.data()}));
+    // Backfill missing displayNames — fixes old messages posted without it
+    const missing=snap.docs.filter(d=>!d.data().displayName&&d.data().uid);
+    for(const d of missing) {
+      const msgUid=d.data().uid;
+      // Try competitors array first (already loaded)
+      let name=competitors.find(c=>c.uid===msgUid)?.displayName;
+      // Fall back to users collection
+      if(!name) {
+        try {
+          const usnap=await getDoc(doc(db,'users',msgUid));
+          if(usnap.exists()) name=usnap.data().displayName;
+        } catch(e){}
+      }
+      if(name) {
+        // Update in Firestore so it's fixed permanently
+        updateDoc(doc(db,'competitions',currentCompId,'chat',d.id),{displayName:name}).catch(()=>{});
+        // Update local state immediately
+        const msg=chatMessages.find(m=>m.id===d.id);
+        if(msg) msg.displayName=name;
+      }
+    }
     refreshPage();
   }));
   // Feed
@@ -1922,7 +1943,11 @@ function renderMsgTabContent() {
       if(!messages.length) return '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--muted);font-size:13px">No messages yet. Say something!</div>';
       return messages.map(function(m) {
         var isMe = m.uid === uid();
-        var name = m.displayName || (competitors.find(function(c){return c.uid===m.uid;})?.displayName) || 'Unknown';
+        // Name resolution: stored displayName → competitors array → userProfile (for own msgs) → uid truncated
+        var name = m.displayName
+          || (competitors.find(function(c){return c.uid===m.uid;})?.displayName)
+          || (m.uid===uid() ? (userProfile?.displayName||'Me') : null)
+          || (m.uid ? m.uid.substring(0,8)+'...' : 'Unknown');
         var ts = m.ts && m.ts.toDate ? m.ts.toDate().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '';
         return '<div style="display:flex;flex-direction:column;align-items:'+(isMe?'flex-end':'flex-start')+';margin-bottom:12px">'
           +(!isMe?'<div style="font-size:11px;font-weight:600;color:var(--accent);margin-bottom:4px;padding:0 4px">'+name+'</div>':'')
