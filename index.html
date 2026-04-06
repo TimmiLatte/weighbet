@@ -616,25 +616,41 @@ function startPersonalListeners() {
 function startCompListeners() {
   if(!currentCompId) return;
   // Members
-  unsubs.push(onSnapshot(collection(db,'competitions',currentCompId,'members'),snap=>{
-    competitors=snap.docs.map(d=>({uid:d.id,...d.data()}));
-    const me=competitors.find(c=>c.uid===uid());
-    compMembership=me||null;
-    updateAdminUI();
-    checkAutoMatchups();
-    refreshPage();
-  }));
-  // All weigh-ins (every member — needed for H2H calc, only weights not shown)
-  unsubs.push(onSnapshot(collection(db,'competitions',currentCompId,'weighins'),snap=>{
-    allWeighIns=snap.docs.map(d=>({id:d.id,...d.data()}));
-    refreshPage();
-  }));
+  unsubs.push(onSnapshot(
+    collection(db,'competitions',currentCompId,'members'),
+    snap=>{
+      competitors=snap.docs.map(d=>({uid:d.id,...d.data()}));
+      const me=competitors.find(c=>c.uid===uid());
+      compMembership=me||null;
+      updateAdminUI();
+      checkAutoMatchups();
+      refreshPage();
+    },
+    err=>{ console.warn('members listener error:',err.code); refreshPage(); }
+  ));
+  // All weigh-ins (every member — needed for H2H calc)
+  unsubs.push(onSnapshot(
+    collection(db,'competitions',currentCompId,'weighins'),
+    snap=>{ allWeighIns=snap.docs.map(d=>({id:d.id,...d.data()})); refreshPage(); },
+    err=>{ console.warn('weighins listener error:',err.code);
+      // On permission error, fall back to just the current user's own weigh-ins
+      if(err.code==='permission-denied') {
+        getDocs(query(collection(db,'competitions',currentCompId,'weighins'),
+          where('userId','==',uid()))).then(s=>{
+          allWeighIns=s.docs.map(d=>({id:d.id,...d.data()})); refreshPage();
+        }).catch(()=>{});
+      }
+    }
+  ));
   // Matchups
-  unsubs.push(onSnapshot(collection(db,'competitions',currentCompId,'matchups'),snap=>{
-    matchups=snap.docs.map(d=>({id:d.id,...d.data()}));
-    matchupsLoaded=true;
-    refreshPage();
-  }));
+  unsubs.push(onSnapshot(
+    collection(db,'competitions',currentCompId,'matchups'),
+    snap=>{ matchups=snap.docs.map(d=>({id:d.id,...d.data()})); matchupsLoaded=true; refreshPage(); },
+    err=>{ console.warn('matchups listener error:',err.code);
+      // Mark as loaded even on error so UI doesn't stay on spinner forever
+      matchupsLoaded=true; refreshPage();
+    }
+  ));
   // Chat
   unsubs.push(onSnapshot(query(collection(db,'competitions',currentCompId,'chat'),orderBy('ts','asc')),async snap=>{
     chatMessages=snap.docs.map(d=>({id:d.id,...d.data()}));
