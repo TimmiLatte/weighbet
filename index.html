@@ -499,6 +499,9 @@ function getPersonalPeriodStart() {
 
 // ─── AUTH ────────────────────────────────────────────────────────────────────
 onAuthStateChanged(auth, async user=>{
+  // Hide loading screen — Firebase has resolved the session
+  const loader=document.getElementById('screen-loading');
+  if(loader) loader.style.display='none';
   currentUser=user;
   if(!user) { showScreen('screen-auth'); return; }
   const snap=await getDoc(doc(db,'users',user.uid));
@@ -2563,9 +2566,16 @@ select.input{cursor:pointer}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 </head>
 <body>
+<!-- Auth loading screen — shown until Firebase resolves session, then replaced -->
+<div id="screen-loading" style="position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999;gap:16px">
+  <div style="font-family:Syne,sans-serif;font-weight:800;font-size:28px">Weigh<span style="color:var(--accent)">Bet</span></div>
+  <div style="width:32px;height:32px;border:3px solid var(--border2);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite"></div>
+</div>
+<style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+
 
 <!-- ─── AUTH SCREEN ──────────────────────────────────────────────────────── -->
-<div id="screen-auth">
+<div id="screen-auth" style="display:none">
   <div class="auth-inner">
     <div class="auth-logo">
       <div style="font-size:40px">⚖️</div>
@@ -2610,7 +2620,7 @@ select.input{cursor:pointer}
 </div>
 
 <!-- ─── APP SHELL ─────────────────────────────────────────────────────────── -->
-<div id="screen-app">
+<div id="screen-app" style="display:none">
 
   <!-- Top nav -->
   <header class="topnav">
@@ -2726,7 +2736,7 @@ select.input{cursor:pointer}
 <div id="toast" class="toast"></div>
 
 <!-- ─── SUPER ADMIN PANEL ──────────────────────────────────────────────────── -->
-<div id="screen-super-admin">
+<div id="screen-super-admin" style="display:none">
   <div class="sa-header">
     <div style="font-family:Syne,sans-serif;font-weight:800;font-size:16px;margin-right:16px">Weigh<span style="color:var(--accent)">Bet</span> <span style="font-size:10px;color:var(--accent2);letter-spacing:1px;text-transform:uppercase;vertical-align:middle">SA</span></div>
     <div class="sa-tabs">
