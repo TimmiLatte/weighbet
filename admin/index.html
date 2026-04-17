@@ -1398,11 +1398,11 @@ window.loadViewAs = async function(compId, uid) {
             ${earnList.map((e,i)=>{
               const isHer=e.uid===uid;
               const rc=i===0?'#f7d76a':i===1?'#c0c0c0':i===2?'#cd7f32':'var(--muted)';
-              return \`<div style="display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:8px;margin-bottom:4px;background:\${isHer?'rgba(232,168,56,0.08)':'rgba(255,255,255,0.02)'};border:1px solid \${isHer?'rgba(232,168,56,0.3)':'var(--border)'}">
-                <span style="font-family:Syne,sans-serif;font-weight:700;font-size:16px;width:24px;text-align:center;color:\${rc}">\${i+1}</span>
-                <span style="flex:1;font-weight:\${isHer?'600':'400'};font-size:13px;color:\${isHer?'var(--accent)':'var(--text)'}">\${e.name}\${isHer?' ← her':''}</span>
-                <span style="font-family:Syne,sans-serif;font-weight:700;font-size:16px;color:var(--success)">\${fmtMoney(e.total)}</span>
-              </div>\`;
+              return '<div style="display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:8px;margin-bottom:4px;background:'+(isHer?'rgba(232,168,56,0.08)':'rgba(255,255,255,0.02)')+';border:1px solid '+(isHer?'rgba(232,168,56,0.3)':'var(--border)')+'">'+
+                '<span style="font-family:Syne,sans-serif;font-weight:700;font-size:16px;width:24px;text-align:center;color:'+rc+'">'+( i+1)+'</span>'+
+                '<span style="flex:1;font-weight:'+(isHer?'600':'400')+';font-size:13px;color:'+(isHer?'var(--accent)':'var(--text)')+'">'+e.name+(isHer?' ← her':'')+'</span>'+
+                '<span style="font-family:Syne,sans-serif;font-weight:700;font-size:16px;color:var(--success)">'+fmtMoney(e.total)+'</span>'+
+              '</div>';
             }).join('')}
           </div>`
       }
