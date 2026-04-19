@@ -170,6 +170,9 @@ function getWeeklyH2HPrize(w) {
   const wpp=Math.max(1,Math.ceil(competitors.length/2));
   const basePerWin=(pool*0.35/weeks)/wpp;
 
+  // Final week handled separately via getFinalWeekPrizePerWinner
+  if(w===weeks) return basePerWin;
+
   let pot=0;
   for(let pw=1;pw<w;pw++) {
     const weeksLeft=weeks-pw;
@@ -178,13 +181,9 @@ function getWeeklyH2HPrize(w) {
     if(weeksLeft>0) pot-=pot/weeksLeft;
     matchups.filter(m=>m.week===pw).forEach(m=>{
       const p1f=isFree(m.p1), p2f=m.p2!=='BYE'&&isFree(m.p2);
-      // Scenario 5: free vs free — prize never allocated, skip
       if(p1f&&p2f) return;
-      // Scenario 3 & 4: vs-median matchup
       if(m.p2==='BYE') {
-        // Scenario 4: free player vs median — always back to pot
         if(p1f){pot+=prize;return;}
-        // Scenario 3: paid player vs median — back to pot if no weigh-in or doesn't strictly beat median
         const p=weeklyPctLost(m.p1,pw);
         if(p===null){pot+=prize;return;}
         const others=competitors.filter(c=>c.uid!==m.p1).map(c=>weeklyPctLost(c.uid,pw)).filter(v=>v!==null).sort((a,b)=>a-b);
@@ -192,7 +191,6 @@ function getWeeklyH2HPrize(w) {
         if(med===null||p<=med) pot+=prize;
         return;
       }
-      // Scenario 2: paid vs free — back to pot if free wins or both no-show
       if(p1f!==p2f) {
         const fu=p1f?m.p1:m.p2, pu=p1f?m.p2:m.p1;
         const fIn=didWeighIn(fu,pw), pIn=didWeighIn(pu,pw);
@@ -202,13 +200,10 @@ function getWeeklyH2HPrize(w) {
         if(fp!==null&&pp!==null&&fp>pp) pot+=prize;
         return;
       }
-      // Scenario 1: both paid no-show
       if(!didWeighIn(m.p1,pw)&&!didWeighIn(m.p2,pw)) pot+=prize;
     });
   }
   const weeksLeft=weeks-w;
-  // Final week: distribute entire remaining pot among this week's winners
-  if(w===weeks) return basePerWin+(pot/wpp);
   return basePerWin+(pot/(weeksLeft+1))/wpp;
 }
 
@@ -245,8 +240,53 @@ function getAccumulatedPot() {
   return pot;
 }
 
+function getFinalWeekPrizePerWinner() {
+  const pool=getPrizePool(), weeks=currentComp?.weeks||1;
+  const wpp=Math.max(1,Math.ceil(competitors.length/2));
+  const basePerWin=(pool*0.35/weeks)/wpp;
+  const accumulated=getAccumulatedPot();
+  // Total available for final week = base allocation for all slots + everything rolled over
+  const totalAvailable=(basePerWin*wpp)+accumulated;
+
+  // Count actual paying winners in the final week
+  let actualWinners=0;
+  matchups.filter(m=>m.week===weeks).forEach(m=>{
+    const p1f=isFree(m.p1), p2f=m.p2!=='BYE'&&isFree(m.p2);
+    if(p1f&&p2f) return; // free vs free — no prize
+    if(m.p2==='BYE') {
+      if(p1f) return; // free vs median — no prize
+      const p=weeklyPctLost(m.p1,weeks);
+      if(p===null) return; // no weigh-in
+      const others=competitors.filter(c=>c.uid!==m.p1).map(c=>weeklyPctLost(c.uid,weeks)).filter(v=>v!==null).sort((a,b)=>a-b);
+      const med=others.length?others[Math.floor(others.length/2)]:null;
+      if(med!==null&&p>med) actualWinners++;
+      return;
+    }
+    if(p1f!==p2f) {
+      const fu=p1f?m.p1:m.p2, pu=p1f?m.p2:m.p1;
+      const fIn=didWeighIn(fu,weeks), pIn=didWeighIn(pu,weeks);
+      if(!fIn&&!pIn) return; // both no-show
+      if(!pIn) return; // paid no-show, free present — no prize
+      const fp=weeklyPctLost(fu,weeks), pp=weeklyPctLost(pu,weeks);
+      if(fp!==null&&pp!==null&&fp>pp) return; // free won — back to... well, final week so just lost
+      actualWinners++; // paid won or free no-showed
+      return;
+    }
+    // Paid vs paid
+    const in1=didWeighIn(m.p1,weeks), in2=didWeighIn(m.p2,weeks);
+    if(!in1&&!in2) return; // both no-show
+    if(in1&&in2) {
+      const e1=weeklyPctLost(m.p1,weeks), e2=weeklyPctLost(m.p2,weeks);
+      if(e1===e2) { actualWinners+=2; return; } // exact tie — both get share
+    }
+    actualWinners++; // one winner
+  });
+  if(actualWinners===0) return totalAvailable; // edge case
+  return totalAvailable/actualWinners;
+}
+
 function getFinalWeekPrize() {
-  return getWeeklyH2HPrize(currentComp?.weeks||8);
+  return getFinalWeekPrizePerWinner();
 }
 
 function getFinalWeekBonus() {
@@ -257,7 +297,8 @@ function getFinalWeekBonus() {
 }
 
 function h2hResult(m, w) {
-  const weeks=currentComp?.weeks||1, prize=getWeeklyH2HPrize(w);
+  const weeks=currentComp?.weeks||1;
+  const prize=w===weeks?getFinalWeekPrizePerWinner():getWeeklyH2HPrize(w);
   const p1Free=isFree(m.p1), p2Free=m.p2!=='BYE'&&isFree(m.p2);
   const prizeAtStake=(!p1Free&&!p2Free&&m.p2!=='BYE')?prize:0;
 
@@ -1370,7 +1411,7 @@ function renderPrizes() {
   const wBL=pool*0.05/weeks;
   const finalBonus=over?getFinalWeekBonus():0;
   const f1st=pool*0.45+finalBonus/2, f2nd=pool*0.15+finalBonus/2;
-  const curPrize=getWeeklyH2HPrize(curWk);
+  const curPrize=over?getFinalWeekPrizePerWinner():getWeeklyH2HPrize(curWk);
 
   // Earnings — all completed weeks including final week if over
   const earnMap={};
@@ -1441,6 +1482,7 @@ function renderJourney() {
   const curWk=getCurrentWeek();
   const unit=sw?.unit||trackerGoal?.unit||'kg';
 
+  // Earnings
   let myEarnings=0;
   if(matchupsLoaded) {
     const weeks=currentComp?.weeks||8, pool=getPrizePool(), wBL=pool*0.05/weeks;
