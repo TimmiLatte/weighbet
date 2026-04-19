@@ -95,7 +95,7 @@ const $  = id => document.getElementById(id);
 window.$ = $;
 
 // ─── DATE / WEEK UTILS ───────────────────────────────────────────────────────
-function ymd(d)      { return d.toISOString().slice(0,10); }
+function ymd(d)      { const yr=d.getFullYear(),mo=String(d.getMonth()+1).padStart(2,'0'),dy=String(d.getDate()).padStart(2,'0'); return yr+'-'+mo+'-'+dy; }
 function weekStart(w) {
   if(!currentComp?.startDate) return null;
   const s = new Date(currentComp.startDate+'T00:00:00');
