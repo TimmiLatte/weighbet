@@ -167,9 +167,8 @@ function nameFor(memberId) {
 // Carried over exactly from validated v1 — do not change without re-validating.
 function getWeeklyH2HPrize(w) {
   const pool=getPrizePool(), weeks=currentComp?.weeks||1;
-  const paying=payingMembers(), wpp=Math.max(1,Math.floor(paying.length/2));
-  const basePerWin=wpp>0?(pool*0.35/weeks)/wpp:(pool*0.35/weeks);
-  if(w===weeks) return basePerWin;
+  const wpp=Math.max(1,Math.ceil(competitors.length/2));
+  const basePerWin=(pool*0.35/weeks)/wpp;
 
   let pot=0;
   for(let pw=1;pw<w;pw++) {
@@ -179,35 +178,44 @@ function getWeeklyH2HPrize(w) {
     if(weeksLeft>0) pot-=pot/weeksLeft;
     matchups.filter(m=>m.week===pw).forEach(m=>{
       const p1f=isFree(m.p1), p2f=m.p2!=='BYE'&&isFree(m.p2);
+      // Scenario 5: free vs free — prize never allocated, skip
       if(p1f&&p2f) return;
+      // Scenario 3 & 4: vs-median matchup
       if(m.p2==='BYE') {
+        // Scenario 4: free player vs median — always back to pot
+        if(p1f){pot+=prize;return;}
+        // Scenario 3: paid player vs median — back to pot if no weigh-in or doesn't strictly beat median
         const p=weeklyPctLost(m.p1,pw);
         if(p===null){pot+=prize;return;}
-        const others=paying.filter(c=>c.uid!==m.p1).map(c=>weeklyPctLost(c.uid,pw)).filter(v=>v!==null).sort((a,b)=>a-b);
+        const others=competitors.filter(c=>c.uid!==m.p1).map(c=>weeklyPctLost(c.uid,pw)).filter(v=>v!==null).sort((a,b)=>a-b);
         const med=others.length?others[Math.floor(others.length/2)]:null;
-        if(med!==null&&p<=med) pot+=prize;
+        if(med===null||p<=med) pot+=prize;
         return;
       }
+      // Scenario 2: paid vs free — back to pot if free wins or both no-show
       if(p1f!==p2f) {
         const fu=p1f?m.p1:m.p2, pu=p1f?m.p2:m.p1;
         const fIn=didWeighIn(fu,pw), pIn=didWeighIn(pu,pw);
         if(!fIn&&!pIn){pot+=prize;return;}
         if(!pIn) return;
         const fp=weeklyPctLost(fu,pw), pp=weeklyPctLost(pu,pw);
-        if(fp!==null&&pp!==null&&fp>=pp) pot+=prize;
+        if(fp!==null&&pp!==null&&fp>pp) pot+=prize;
         return;
       }
+      // Scenario 1: both paid no-show
       if(!didWeighIn(m.p1,pw)&&!didWeighIn(m.p2,pw)) pot+=prize;
     });
   }
   const weeksLeft=weeks-w;
+  // Final week: distribute entire remaining pot among this week's winners
+  if(w===weeks) return basePerWin+(pot/wpp);
   return basePerWin+(pot/(weeksLeft+1))/wpp;
 }
 
 function getAccumulatedPot() {
   const pool=getPrizePool(), weeks=currentComp?.weeks||1;
-  const paying=payingMembers(), wpp=Math.max(1,Math.floor(paying.length/2));
-  const basePerWin=wpp>0?(pool*0.35/weeks)/wpp:(pool*0.35/weeks);
+  const wpp=Math.max(1,Math.ceil(competitors.length/2));
+  const basePerWin=(pool*0.35/weeks)/wpp;
   let pot=0;
   for(let pw=1;pw<weeks;pw++) {
     const weeksLeft=weeks-pw;
@@ -218,17 +226,18 @@ function getAccumulatedPot() {
       const p1f=isFree(m.p1), p2f=m.p2!=='BYE'&&isFree(m.p2);
       if(p1f&&p2f) return;
       if(m.p2==='BYE') {
+        if(p1f){pot+=prize;return;}
         const p=weeklyPctLost(m.p1,pw); if(p===null){pot+=prize;return;}
-        const others=payingMembers().filter(c=>c.uid!==m.p1).map(c=>weeklyPctLost(c.uid,pw)).filter(v=>v!==null).sort((a,b)=>a-b);
+        const others=competitors.filter(c=>c.uid!==m.p1).map(c=>weeklyPctLost(c.uid,pw)).filter(v=>v!==null).sort((a,b)=>a-b);
         const med=others.length?others[Math.floor(others.length/2)]:null;
-        if(med!==null&&p<=med) pot+=prize; return;
+        if(med===null||p<=med) pot+=prize; return;
       }
       if(p1f!==p2f) {
         const fu=p1f?m.p1:m.p2, pu=p1f?m.p2:m.p1;
         if(!didWeighIn(fu,pw)&&!didWeighIn(pu,pw)){pot+=prize;return;}
         if(!didWeighIn(pu,pw)) return;
         const fp=weeklyPctLost(fu,pw), pp=weeklyPctLost(pu,pw);
-        if(fp!==null&&pp!==null&&fp>=pp) pot+=prize; return;
+        if(fp!==null&&pp!==null&&fp>pp) pot+=prize; return;
       }
       if(!didWeighIn(m.p1,pw)&&!didWeighIn(m.p2,pw)) pot+=prize;
     });
@@ -237,18 +246,7 @@ function getAccumulatedPot() {
 }
 
 function getFinalWeekPrize() {
-  const weeks=currentComp?.weeks||8, pool=getPrizePool();
-  const wpp=Math.max(1,Math.floor(payingMembers().length/2));
-  const basePerWin=wpp>0?(pool*0.35/weeks)/wpp:(pool*0.35/weeks);
-  const results=getAllH2HResults(weeks);
-  let actual=0;
-  results.forEach(r=>{
-    if(r.matchType==='free') return;
-    if(r.winner&&!(isFree(r.winner)&&r.matchType==='wildcard')) actual++;
-    if(r.tied) actual++;
-  });
-  if(actual===0) return basePerWin;
-  return (wpp*basePerWin)/actual;
+  return getWeeklyH2HPrize(currentComp?.weeks||8);
 }
 
 function getFinalWeekBonus() {
@@ -264,10 +262,21 @@ function h2hResult(m, w) {
   const prizeAtStake=(!p1Free&&!p2Free&&m.p2!=='BYE')?prize:0;
 
   if(m.p2==='BYE') {
+    // Free player vs median — bragging rights only, prize always back to pool
+    if(p1Free) {
+      const p1pct=weeklyPctLost(m.p1,w);
+      const others=competitors.filter(c=>c.uid!==m.p1).map(c=>weeklyPctLost(c.uid,w)).filter(v=>v!==null).sort((a,b)=>a-b);
+      const median=others.length?others[Math.floor(others.length/2)]:null;
+      const beat=p1pct!==null&&median!==null&&p1pct>median;
+      return {week:w,p1:m.p1,p2:'BYE',winner:beat?m.p1:null,p1pct,p2pct:null,
+        note:beat?'Beat median (bragging rights only — free player)':'Did not beat median',
+        prize:0,prizeAtStake:prize,matchType:'free'};
+    }
+    // Paid player vs median — must strictly beat median to win
     const p1pct=weeklyPctLost(m.p1,w);
-    const others=payingMembers().filter(c=>c.uid!==m.p1).map(c=>weeklyPctLost(c.uid,w)).filter(v=>v!==null).sort((a,b)=>a-b);
+    const others=competitors.filter(c=>c.uid!==m.p1).map(c=>weeklyPctLost(c.uid,w)).filter(v=>v!==null).sort((a,b)=>a-b);
     const median=others.length?others[Math.floor(others.length/2)]:null;
-    let winner=null, note='BYE — must beat more than half of competitors';
+    let winner=null, note='vs Median — must strictly beat median to win';
     if(p1pct===null) note='No weigh-in — prize back to pool';
     else if(median!==null) {
       winner=p1pct>median?m.p1:null;
@@ -964,7 +973,7 @@ function renderOverview() {
 
   const myStats=stats.find(c=>c.uid===uid());
   const myRank=stats.findIndex(c=>c.uid===uid())+1;
-  const pool=getPrizePool(), wpp=Math.max(1,Math.floor(payingMembers().length/2));
+  const pool=getPrizePool(), wpp=Math.max(1,Math.ceil(competitors.length/2));
   const wBL=pool>0?pool*0.05/weeks:0;
 
   // Week H2H for this user
@@ -1355,25 +1364,34 @@ function renderPrizes() {
     return;
   }
   const pool=getPrizePool(), weeks=currentComp?.weeks||8;
-  const paying=payingMembers(), wpp=Math.max(1,Math.floor(paying.length/2));
-  const curWk=getCurrentWeek(), isFinal=curWk===weeks;
+  const paying=payingMembers(), wpp=Math.max(1,Math.ceil(competitors.length/2));
+  const curWk=getCurrentWeek(), over=isCompOver();
+  const isFinal=curWk===weeks;
   const wBL=pool*0.05/weeks;
-  const finalBonus=isFinal?getFinalWeekBonus():0;
+  const finalBonus=over?getFinalWeekBonus():0;
   const f1st=pool*0.45+finalBonus/2, f2nd=pool*0.15+finalBonus/2;
   const curPrize=getWeeklyH2HPrize(curWk);
 
-  // Earnings — all competitors
+  // Earnings — all completed weeks including final week if over
   const earnMap={};
   const finalPrize=getFinalWeekPrize();
-  for(let w=1;w<curWk;w++) {
+  const weeksToCount=over?weeks:curWk-1;
+  for(let w=1;w<=weeksToCount;w++) {
     getAllH2HResults(w).forEach(r=>{
-      // r.prize is already 0 for free-player wins, free-vs-free, and unclaimed slots
       if(r.tied) { if(r.prize1>0) earnMap[r.p1]=(earnMap[r.p1]||0)+r.prize1; if(r.prize2>0) earnMap[r.p2]=(earnMap[r.p2]||0)+r.prize2; }
       else if(r.winner&&r.prize>0) earnMap[r.winner]=(earnMap[r.winner]||0)+r.prize;
     });
     // Weekly BL bonus — paying members only
     paying.map(c=>({uid:c.uid,pct:weeklyPctLost(c.uid,w)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct).slice(0,1).forEach(c=>{ earnMap[c.uid]=(earnMap[c.uid]||0)+wBL; });
   }
+
+  // When comp is over, attribute 1st/2nd place to top 2 paying players by % lost
+  if(over) {
+    const payingLb=competitors.filter(c=>c.playerType!=='free').map(c=>({uid:c.uid,pct:totalPctLost(c.uid)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct);
+    if(payingLb[0]) earnMap[payingLb[0].uid]=(earnMap[payingLb[0].uid]||0)+f1st;
+    if(payingLb[1]) earnMap[payingLb[1].uid]=(earnMap[payingLb[1].uid]||0)+f2nd;
+  }
+
   // Filter out free players — they can't earn prize money
   const earnList=Object.entries(earnMap).map(([id,total])=>({uid:id,total})).filter(e=>!isFree(e.uid)).sort((a,b)=>b.total-a.total);
 
@@ -1423,11 +1441,12 @@ function renderJourney() {
   const curWk=getCurrentWeek();
   const unit=sw?.unit||trackerGoal?.unit||'kg';
 
-  // Earnings
   let myEarnings=0;
   if(matchupsLoaded) {
     const weeks=currentComp?.weeks||8, pool=getPrizePool(), wBL=pool*0.05/weeks;
-    for(let w=1;w<curWk;w++) {
+    const over=isCompOver();
+    const weeksToCount=over?weeks:curWk-1;
+    for(let w=1;w<=weeksToCount;w++) {
       getAllH2HResults(w).forEach(r=>{
         // Use r.prize directly — already 0 for free player wins
         if(r.tied){ if(r.p1===uid()&&r.prize1>0) myEarnings+=r.prize1; if(r.p2===uid()&&r.prize2>0) myEarnings+=r.prize2; }
@@ -1438,6 +1457,14 @@ function renderJourney() {
         const bl=payingMembers().map(c=>({uid:c.uid,pct:weeklyPctLost(c.uid,w)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct);
         if(bl.length>0&&bl[0].uid===uid()) myEarnings+=wBL;
       }
+    }
+    // When comp is over, add 1st/2nd place prize if this user placed
+    if(over&&!isFree(uid())) {
+      const finalBonus=getFinalWeekBonus();
+      const f1st=pool*0.45+finalBonus/2, f2nd=pool*0.15+finalBonus/2;
+      const payingLb=competitors.filter(c=>c.playerType!=='free').map(c=>({uid:c.uid,pct:totalPctLost(c.uid)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct);
+      if(payingLb[0]?.uid===uid()) myEarnings+=f1st;
+      else if(payingLb[1]?.uid===uid()) myEarnings+=f2nd;
     }
   }
   let h2hWins=0;
