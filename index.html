@@ -1031,6 +1031,16 @@ function renderSelectScreen() {
         <span style="color:var(--muted)">→</span>
       </button>`).join('')}
     `}
+    ${myArchivedCompetitions.length>0?`
+      <div class="section-label" style="margin-top:24px">Past Competitions</div>
+      ${myArchivedCompetitions.map(c=>`<button class="comp-row" style="opacity:0.75" data-cid="${c.compId}" onclick="openArchivedViewer(this.dataset.cid)">
+        <div>
+          <div style="font-weight:600">${c.compName||c.name||'Unnamed'} <span style="font-size:11px;color:var(--muted);font-weight:400">· Archived</span></div>
+          <div style="font-size:12px;color:var(--muted)">${c.role||'competitor'} · ${c.playerType==='free'?'Free':'Paying'}</div>
+        </div>
+        <span style="color:var(--muted)">📦</span>
+      </button>`).join('')}
+    `:''}
     <div class="section-label" style="margin-top:24px">Join a Competition</div>
     <div style="display:flex;gap:8px">
       <input id="join-code-input" class="input" placeholder="Invite code" style="flex:1;text-transform:uppercase">
@@ -2365,17 +2375,18 @@ function renderPrefs() {
     <div class="card">
       <div class="card-label">App</div>
       <div class="pref-row"><div><div style="font-weight:500">Appearance</div><div style="font-size:12px;color:var(--muted)">Light or dark theme</div></div><button class="btn btn-secondary" onclick="toggleTheme()" id="theme-btn">🌙 Dark</button></div>
-      <div class="pref-row"><div><div style="font-weight:500">Switch Competition</div><div style="font-size:12px;color:var(--muted)">Join a different competition</div></div><button class="btn btn-secondary" onclick="switchComp()">⇄ Switch</button></div>
+      <div class="pref-row"><div><div style="font-weight:500">${currentComp?'Switch Competition':'Join / Create Competition'}</div><div style="font-size:12px;color:var(--muted)">${currentComp?'Join a different competition':'Start or join a competition'}</div></div><button class="btn btn-secondary" onclick="switchComp()">⇄ ${currentComp?'Switch':'Go'}</button></div>
+      ${myArchivedCompetitions.length>0?`<div class="pref-row"><div><div style="font-weight:500">Past Competitions</div><div style="font-size:12px;color:var(--muted)">${myArchivedCompetitions.length} archived competition${myArchivedCompetitions.length===1?'':'s'}</div></div><button class="btn btn-secondary" onclick="openArchivedList()">📦 View</button></div>`:''}
       <div class="pref-row"><div><div style="font-weight:500">Sign Out</div></div><button class="btn btn-danger" onclick="doSignOut()">⏻ Sign Out</button></div>
     </div>
-    <div class="card">
+    ${currentComp?`<div class="card">
       <div class="card-label">🔗 Invite People</div>
       <div class="invite-box"><div id="invite-code-disp" style="font-family:DM Mono,monospace;font-size:24px;font-weight:700;letter-spacing:4px">${currentComp?.inviteCode||'—'}</div></div>
       <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
         <button class="btn btn-teal btn-sm" onclick="copyLink()">🔗 Copy Invite Link</button>
         <button class="btn btn-secondary btn-sm" onclick="copyCode()">📋 Copy Code</button>
       </div>
-    </div>
+    </div>`:''}
     <div class="card">
       <div class="card-label">🐛 Report a Bug</div>
       <div class="form-group"><label class="label">What went wrong?</label><input id="bug-title" class="input" placeholder="e.g. Leaderboard not updating"></div>
@@ -2398,6 +2409,359 @@ window.submitBug=async function(){
   if($('bug-title'))$('bug-title').value='';
   if($('bug-desc'))$('bug-desc').value='';
 };
+
+// ─── ARCHIVED COMPETITION VIEWER ─────────────────────────────────────────────
+// Fully isolated from active competition state — uses its own data variables.
+// Opens as a full-screen overlay, closes cleanly without touching currentComp etc.
+
+let avComp=null, avMembers=[], avWeighIns=[], avMatchups=[], avTab='leaderboard';
+
+// ── Data helpers scoped to archived viewer ──
+function avWeighInsFor(memberId) {
+  return avWeighIns.filter(w=>w.userId===memberId).sort((a,b)=>a.date.localeCompare(b.date));
+}
+function avStartWeight(memberId) { const wi=avWeighInsFor(memberId); return wi.length?wi[0]:null; }
+function avTotalPct(memberId) {
+  const wi=avWeighInsFor(memberId); if(wi.length<2) return null;
+  return (wi[0].weight-wi[wi.length-1].weight)/wi[0].weight*100;
+}
+function avLastWIForWeek(memberId, w) {
+  if(!avComp?.startDate) return null;
+  const s=new Date(avComp.startDate+'T00:00:00');
+  const ws=new Date(s); ws.setDate(ws.getDate()+(w-1)*7);
+  const we=new Date(ws); we.setDate(we.getDate()+6);
+  const wsS=ymd(ws), weS=ymd(we);
+  const es=avWeighInsFor(memberId).filter(e=>e.date>=wsS&&e.date<=weS);
+  return es.length?es[es.length-1]:null;
+}
+function avWeeklyPct(memberId, w) {
+  const end=avLastWIForWeek(memberId,w); if(!end) return null;
+  let prev=null;
+  for(let pw=w-1;pw>=1;pw--){ const p=avLastWIForWeek(memberId,pw); if(p){prev=p.weight;break;} }
+  if(prev===null){ const sw=avStartWeight(memberId); prev=sw?sw.weight:end.weight; }
+  return prev===0?0:(prev-end.weight)/prev*100;
+}
+function avIsFree(memberId) { return avMembers.find(c=>c.uid===memberId)?.playerType==='free'; }
+function avNameFor(memberId) {
+  if(memberId==='BYE') return 'BYE';
+  return avMembers.find(c=>c.uid===memberId)?.displayName||'Unknown';
+}
+function avPayingMembers() { return avMembers.filter(c=>c.playerType!=='free'); }
+function avPrizePool() { return avPayingMembers().length*(avComp?.buyin||0); }
+function avDidWeighIn(memberId,w) { return avLastWIForWeek(memberId,w)!==null; }
+
+function avH2HResult(m, w) {
+  const weeks=avComp?.weeks||1, pool=avPrizePool();
+  const wpp=Math.max(1,Math.ceil(avMembers.length/2));
+  const basePerWin=(pool*0.35/weeks)/wpp;
+  // Simplified prize for display — use base only (full rollover calc omitted for archived view)
+  const prize=basePerWin;
+  const p1Free=avIsFree(m.p1), p2Free=m.p2!=='BYE'&&avIsFree(m.p2);
+  if(m.p2==='BYE') {
+    const p1pct=avWeeklyPct(m.p1,w);
+    const others=avMembers.filter(c=>c.uid!==m.p1).map(c=>avWeeklyPct(c.uid,w)).filter(v=>v!==null).sort((a,b)=>a-b);
+    const median=others.length?others[Math.floor(others.length/2)]:null;
+    const beat=p1pct!==null&&median!==null&&p1pct>median;
+    return {week:w,p1:m.p1,p2:'BYE',winner:beat&&!p1Free?m.p1:null,p1pct,p2pct:null,note:p1Free?'Free player vs median':(beat?'Beat median':'Did not beat median'),prize:0};
+  }
+  if(p1Free&&p2Free) {
+    const e1=avWeeklyPct(m.p1,w),e2=avWeeklyPct(m.p2,w);
+    const winner=e1!==null&&e2!==null?(e1>e2?m.p1:e2>e1?m.p2:null):e1!==null?m.p1:e2!==null?m.p2:null;
+    return {week:w,p1:m.p1,p2:m.p2,winner,p1pct:e1,p2pct:e2,note:'Friendly match',prize:0};
+  }
+  const e1=avWeeklyPct(m.p1,w),e2=avWeeklyPct(m.p2,w);
+  const in1=avDidWeighIn(m.p1,w),in2=avDidWeighIn(m.p2,w);
+  let winner=null,note='',prizeWon=0;
+  if(!in1&&!in2) note='Both no-show';
+  else if(!in1) {winner=m.p2;prizeWon=prize;note=avNameFor(m.p1)+' no-show';}
+  else if(!in2) {winner=m.p1;prizeWon=prize;note=avNameFor(m.p2)+' no-show';}
+  else if(e1===e2) {note='Tie';prizeWon=prize/2;}
+  else {winner=e1>e2?m.p1:m.p2;prizeWon=prize;note=avNameFor(winner)+' wins';}
+  return {week:w,p1:m.p1,p2:m.p2,winner,p1pct:e1,p2pct:e2,note,prize:prizeWon};
+}
+
+// ── Open list of archived competitions ──
+window.openArchivedList=function(){
+  if(!myArchivedCompetitions.length) return;
+  if(myArchivedCompetitions.length===1) { openArchivedViewer(myArchivedCompetitions[0].compId); return; }
+  // Multiple — show picker
+  const overlay=document.createElement('div');
+  overlay.id='av-list-overlay';
+  overlay.style.cssText='position:fixed;inset:0;z-index:5000;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.innerHTML=`<div style="background:var(--bg2);border-radius:20px;padding:24px;width:100%;max-width:380px;max-height:80vh;overflow-y:auto">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
+      <div style="font-family:Syne,sans-serif;font-weight:800;font-size:18px;flex:1">📦 Past Competitions</div>
+      <button onclick="document.getElementById('av-list-overlay').remove()" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--muted)">✕</button>
+    </div>
+    ${myArchivedCompetitions.map(c=>`
+      <button data-cid="${c.compId}" onclick="document.getElementById('av-list-overlay').remove();openArchivedViewer(this.dataset.cid)"
+        style="width:100%;display:flex;align-items:center;gap:12px;background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:8px;cursor:pointer;text-align:left">
+        <span style="font-size:24px">📦</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:14px">${c.compName||c.name||'Unnamed'}</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:2px">${c.role||'competitor'} · ${c.playerType==='free'?'Free':'Paying'}${c.startDate?' · Started '+fmtDate(c.startDate):''}</div>
+        </div>
+        <span style="color:var(--muted)">→</span>
+      </button>`).join('')}
+  </div>`;
+  overlay.addEventListener('click',e=>{if(e.target===overlay)overlay.remove();});
+  document.body.appendChild(overlay);
+};
+
+// ── Open the viewer for a specific archived comp ──
+window.openArchivedViewer=async function(compId){
+  // Remove any existing viewer
+  const existing=document.getElementById('av-overlay');
+  if(existing) existing.remove();
+
+  // Build overlay with loading state
+  const overlay=document.createElement('div');
+  overlay.id='av-overlay';
+  overlay.style.cssText='position:fixed;inset:0;z-index:5000;background:var(--bg);display:flex;flex-direction:column;overflow:hidden';
+  overlay.innerHTML=`
+    <div id="av-header" style="background:var(--bg2);border-bottom:1px solid var(--border);padding:0 20px;height:56px;display:flex;align-items:center;gap:16px;flex-shrink:0">
+      <button onclick="closeArchivedViewer()" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:20px;padding:4px;line-height:1">←</button>
+      <div style="flex:1;min-width:0">
+        <div id="av-title" style="font-family:Syne,sans-serif;font-weight:800;font-size:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Loading...</div>
+        <div style="font-size:11px;color:var(--muted)">📦 Archived · Read only</div>
+      </div>
+    </div>
+    <div id="av-tabs" style="background:var(--bg2);border-bottom:1px solid var(--border);display:flex;padding:0 16px;flex-shrink:0"></div>
+    <div id="av-body" style="flex:1;overflow-y:auto;padding:16px 20px">
+      <div style="display:flex;align-items:center;justify-content:center;height:200px;color:var(--muted)">
+        <div style="text-align:center"><div style="font-size:32px;margin-bottom:12px">⏳</div>Loading competition data...</div>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  // Load all data
+  try {
+    const [cs,ms,ws,mps]=await Promise.all([
+      getDoc(doc(db,'competitions',compId)),
+      getDocs(collection(db,'competitions',compId,'members')),
+      getDocs(collection(db,'competitions',compId,'weighins')),
+      getDocs(collection(db,'competitions',compId,'matchups'))
+    ]);
+    avComp={id:compId,...cs.data()};
+    avMembers=ms.docs.map(d=>({uid:d.id,...d.data()}));
+    avWeighIns=ws.docs.map(d=>({id:d.id,...d.data()}));
+    avMatchups=mps.docs.map(d=>({id:d.id,...d.data()}));
+    avTab='leaderboard';
+    const titleEl=$('av-title');
+    if(titleEl) titleEl.textContent=avComp.name||'Archived Competition';
+    renderAvTabs();
+    renderAvBody();
+  } catch(e) {
+    const body=$('av-body');
+    if(body) body.innerHTML=`<div class="empty">Failed to load competition data: ${e.message}</div>`;
+  }
+};
+
+window.closeArchivedViewer=function(){
+  const el=document.getElementById('av-overlay');
+  if(el) el.remove();
+  avComp=null; avMembers=[]; avWeighIns=[]; avMatchups=[];
+};
+
+window.setAvTab=function(tab){ avTab=tab; renderAvTabs(); renderAvBody(); };
+
+function renderAvTabs() {
+  const el=$('av-tabs'); if(!el) return;
+  const tabs=[{id:'leaderboard',label:'🏆 Leaderboard'},{id:'prizes',label:'💰 Prizes'},{id:'h2h',label:'⚔️ H2H'},{id:'mystats',label:'👤 My Stats'}];
+  el.innerHTML=tabs.map(t=>`
+    <button onclick="setAvTab('${t.id}')" style="padding:12px 14px;border:none;background:none;cursor:pointer;font-size:13px;font-weight:600;color:${avTab===t.id?'var(--accent)':'var(--muted)'};border-bottom:2px solid ${avTab===t.id?'var(--accent)':'transparent'};white-space:nowrap;transition:all .15s">${t.label}</button>
+  `).join('');
+}
+
+function renderAvBody() {
+  const el=$('av-body'); if(!el) return;
+  if(avTab==='leaderboard') el.innerHTML=renderAvLeaderboard();
+  else if(avTab==='prizes') el.innerHTML=renderAvPrizes();
+  else if(avTab==='h2h') el.innerHTML=renderAvH2H();
+  else if(avTab==='mystats') el.innerHTML=renderAvMyStats();
+}
+
+function renderAvLeaderboard() {
+  const weeks=avComp?.weeks||8;
+  const stats=avMembers.map(c=>({
+    uid:c.uid, name:c.displayName||'?', free:c.playerType==='free',
+    pct:avTotalPct(c.uid), wi:avWeighInsFor(c.uid).length
+  })).filter(c=>c.wi>0).sort((a,b)=>(b.pct||0)-(a.pct||0));
+
+  const isMe=c=>c.uid===uid();
+  const pool=avPrizePool();
+
+  return `
+    <div class="card" style="margin-bottom:14px">
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:0">
+        <div class="stat-item"><div class="stat-val">${avMembers.length}</div><div class="stat-lbl">Competitors</div></div>
+        <div class="stat-item"><div class="stat-val">${weeks}</div><div class="stat-lbl">Weeks</div></div>
+        <div class="stat-item"><div class="stat-val">${pool>0?fmtMoney(pool):'Free'}</div><div class="stat-lbl">Prize Pool</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-label">🏆 Final Standings</div>
+      ${stats.length===0?'<div class="empty">No weigh-ins recorded.</div>':stats.map((c,i)=>{
+        const medal=i===0?'🥇':i===1?'🥈':i===2?'🥉':'';
+        const me=isMe(c);
+        return `<div class="lb-row ${me?'lb-me':''}">
+          <span class="lb-rank">${medal||i+1}</span>
+          ${avatar(c.name,32)}
+          <span class="lb-name">${c.name}${me?' <span class="tag">you</span>':''}${c.free?' <span class="tag" style="background:rgba(95,212,179,0.1);color:var(--success)">free</span>':''}</span>
+          <span class="lb-pct">${fmtPct(c.pct)}</span>
+        </div>`;
+      }).join('')}
+    </div>`;
+}
+
+function renderAvPrizes() {
+  const pool=avPrizePool(), weeks=avComp?.weeks||8;
+  const paying=avPayingMembers();
+  const wpp=Math.max(1,Math.ceil(avMembers.length/2));
+  const baseH2H=(pool*0.35/weeks)/wpp;
+  const wBL=pool>0?pool*0.05/weeks:0;
+  const f1st=pool*0.45, f2nd=pool*0.15;
+
+  // Final leaderboard (paying only)
+  const lb=paying.map(c=>({uid:c.uid,name:c.displayName||'?',pct:avTotalPct(c.uid)}))
+    .filter(c=>c.pct!=null).sort((a,b)=>b.pct-a.pct);
+
+  // Tally H2H earnings per player
+  const earnings={};
+  avMembers.forEach(c=>earnings[c.uid]=0);
+  for(let w=1;w<=weeks;w++) {
+    avMatchups.filter(m=>m.week===w).forEach(m=>{
+      const r=avH2HResult(m,w);
+      if(r.winner&&earnings[r.winner]!==undefined) earnings[r.winner]+=r.prize;
+      // Weekly BL bonus
+    });
+    // Weekly BL
+    if(wBL>0) {
+      const blList=paying.map(c=>({uid:c.uid,pct:avWeeklyPct(c.uid,w)})).filter(x=>x.pct!=null).sort((a,b)=>b.pct-a.pct);
+      if(blList.length&&earnings[blList[0].uid]!==undefined) earnings[blList[0].uid]+=wBL;
+    }
+  }
+  if(lb[0]) earnings[lb[0].uid]=(earnings[lb[0].uid]||0)+f1st;
+  if(lb[1]) earnings[lb[1].uid]=(earnings[lb[1].uid]||0)+f2nd;
+
+  return `
+    <div class="prize-pill pp-gold"><div><div class="pp-label">🥇 1st Place — Biggest Loser</div><div class="pp-sub">${lb[0]?lb[0].name:'—'}</div></div><div class="pp-val">${fmtMoney(f1st)}</div></div>
+    <div class="prize-pill pp-silver"><div><div class="pp-label">🥈 2nd Place — Biggest Loser</div><div class="pp-sub">${lb[1]?lb[1].name:'—'}</div></div><div class="pp-val">${fmtMoney(f2nd)}</div></div>
+    <div class="prize-pill pp-accent"><div><div class="pp-label">⚔️ Weekly H2H (base)</div><div class="pp-sub">Per win per week</div></div><div class="pp-val">${fmtMoney(baseH2H)}</div></div>
+    <div class="prize-pill pp-teal"><div><div class="pp-label">📉 Weekly Biggest Loser Bonus</div><div class="pp-sub">Per week</div></div><div class="pp-val">${fmtMoney(wBL)}</div></div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-label">💸 Estimated Earnings</div>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:12px">H2H wins + weekly BL bonuses + final prizes.</p>
+      ${Object.entries(earnings).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]).map(([muid,earned])=>{
+        const name=avNameFor(muid), me=muid===uid();
+        return `<div class="lb-row ${me?'lb-me':''}">
+          ${avatar(name,32)}
+          <span class="lb-name">${name}${me?' <span class="tag">you</span>':''}</span>
+          <span style="font-family:Syne,sans-serif;font-weight:700;color:var(--success)">${fmtMoney(earned)}</span>
+        </div>`;
+      }).join('')||'<div class="empty">No prize data.</div>'}
+    </div>`;
+}
+
+function renderAvH2H() {
+  const weeks=avComp?.weeks||8;
+  let html='';
+  for(let w=weeks;w>=1;w--) {
+    const wMatches=avMatchups.filter(m=>m.week===w);
+    if(!wMatches.length) continue;
+    const myMatch=wMatches.find(m=>m.p1===uid()||m.p2===uid());
+    html+=`<div style="margin-bottom:6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted)">Week ${w}</div>`;
+    html+=wMatches.map(m=>{
+      const r=avH2HResult(m,w);
+      const isMyMatch=m.p1===uid()||m.p2===uid();
+      const p1name=avNameFor(m.p1), p2name=m.p2==='BYE'?'BYE':avNameFor(m.p2);
+      const won=r.winner===uid(), lost=r.winner&&r.winner!==uid()&&!r.tied;
+      return `<div class="compact-match ${isMyMatch?'compact-match-me':''}" style="margin-bottom:8px">
+        <div class="cm-row">
+          <div class="cm-player">
+            ${avatar(p1name,24)}
+            <span class="cm-name" style="color:${r.winner===m.p1?'var(--success)':r.winner&&r.winner!==m.p1?'var(--muted)':'var(--text)'}">${p1name}</span>
+            <span class="cm-pct" style="color:${r.winner===m.p1?'var(--success)':'var(--muted)'}">${r.p1pct!=null?fmtPct(r.p1pct):'—'}</span>
+          </div>
+          <div class="cm-vs">VS</div>
+          <div class="cm-player cm-player-right">
+            <span class="cm-pct" style="color:${r.winner===m.p2?'var(--success)':'var(--muted)'}">${r.p2pct!=null?fmtPct(r.p2pct):'—'}</span>
+            <span class="cm-name" style="color:${r.winner===m.p2?'var(--success)':r.winner&&r.winner!==m.p2?'var(--muted)':'var(--text)'};text-align:right">${p2name}</span>
+            ${m.p2==='BYE'?'':avatar(p2name,24)}
+          </div>
+        </div>
+        <span class="cm-note ${r.winner===uid()?'cm-note-win':r.winner&&r.winner!==uid()?'cm-note-loss':''}">${r.note}${r.prize>0?' · '+fmtMoney(r.prize):''}</span>
+      </div>`;
+    }).join('');
+  }
+  return `<div class="card"><div class="card-label">⚔️ All H2H Results</div>${html||'<div class="empty">No matchups recorded.</div>'}</div>`;
+}
+
+function renderAvMyStats() {
+  const wi=avWeighInsFor(uid());
+  const sw=wi.length?wi[0]:null;
+  const lw=wi.length?wi[wi.length-1]:null;
+  const pct=avTotalPct(uid());
+  const unit=sw?.unit||'kg';
+  const weeks=avComp?.weeks||8;
+
+  // My H2H record
+  let wins=0, losses=0, draws=0;
+  for(let w=1;w<=weeks;w++) {
+    avMatchups.filter(m=>m.week===w&&(m.p1===uid()||m.p2===uid())).forEach(m=>{
+      const r=avH2HResult(m,w);
+      if(r.tied) draws++;
+      else if(r.winner===uid()) wins++;
+      else if(r.winner) losses++;
+    });
+  }
+
+  const me=avMembers.find(c=>c.uid===uid());
+  if(!me) return `<div class="empty">You don't appear to be a member of this competition.</div>`;
+
+  return `
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px">
+        ${avatar(me.displayName||'?',48)}
+        <div>
+          <div style="font-family:Syne,sans-serif;font-weight:800;font-size:18px">${me.displayName||'You'}</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:2px">${me.playerType==='free'?'Free player':'Paying player'} · ${me.role||'competitor'}</div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px">
+        <div class="stat-item"><div class="stat-val">${pct!=null?fmtPct(pct):'—'}</div><div class="stat-lbl">Total Lost</div></div>
+        <div class="stat-item"><div class="stat-val">${wi.length}</div><div class="stat-lbl">Weigh-ins</div></div>
+        <div class="stat-item"><div class="stat-val">${sw?sw.weight.toFixed(1)+' '+unit:'—'}</div><div class="stat-lbl">Start Weight</div></div>
+        <div class="stat-item"><div class="stat-val">${lw?lw.weight.toFixed(1)+' '+unit:'—'}</div><div class="stat-lbl">Final Weight</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-label">⚔️ H2H Record</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+        <div class="stat-item"><div class="stat-val" style="color:var(--success)">${wins}</div><div class="stat-lbl">Wins</div></div>
+        <div class="stat-item"><div class="stat-val" style="color:var(--danger)">${losses}</div><div class="stat-lbl">Losses</div></div>
+        <div class="stat-item"><div class="stat-val" style="color:var(--muted)">${draws}</div><div class="stat-lbl">Draws</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-label">📅 Weigh-in History</div>
+      ${wi.length===0?'<div class="empty">No weigh-ins recorded.</div>':`
+      <table class="data-table">
+        <thead><tr><th>Date</th><th>Weight</th><th>Weekly %</th><th>Total %</th></tr></thead>
+        <tbody>${wi.slice().reverse().map((e,i,arr)=>{
+          const prev=arr[i+1];
+          const wpct=prev?((prev.weight-e.weight)/prev.weight*100):null;
+          const tpct=sw?((sw.weight-e.weight)/sw.weight*100):null;
+          return `<tr>
+            <td>${fmtDate(e.date)}</td>
+            <td style="font-weight:600">${e.weight.toFixed(1)} ${e.unit||unit}</td>
+            <td style="color:${wpct!=null&&wpct>=0?'var(--success)':'var(--danger)'}">${wpct!=null?fmtPct(wpct):'—'}</td>
+            <td style="color:var(--accent2)">${tpct!=null?fmtPct(tpct):'—'}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>`}
+    </div>`;
+}
 
 // ─── SETTINGS — ADMIN (competition organisers only) ──────────────────────────
 function renderAdminSettings() {
@@ -2645,6 +3009,10 @@ window.joinByCode=joinByCode;
 window.joinComp=joinComp;
 window.renderSelectScreen=renderSelectScreen;
 window.normaliseTag=normaliseTag;
+window.openArchivedList=openArchivedList;
+window.openArchivedViewer=openArchivedViewer;
+window.closeArchivedViewer=closeArchivedViewer;
+window.setAvTab=setAvTab;
 </script>
 
 <style>
