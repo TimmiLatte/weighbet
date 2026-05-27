@@ -60,6 +60,7 @@ let chatMessages   = [];
 
 // My competitions list
 let myCompetitions = [];
+let myArchivedCompetitions = [];
 
 // Listeners
 let unsubs = [];
@@ -623,9 +624,12 @@ onAuthStateChanged(auth, async user=>{
     await enterComp(myCompetitions[0].compId);
   } else if(myCompetitions.length===0) {
     const code=sessionStorage.getItem('pendingJoin');
-    if(code) { sessionStorage.removeItem('pendingJoin'); await joinByCode(code); }
-    else showScreen('screen-select');
-    renderSelectScreen();
+    if(code) { sessionStorage.removeItem('pendingJoin'); await joinByCode(code); return; }
+    // No active competitions — go to app shell on Me tab
+    // (archived competitions are accessible via the select screen)
+    showScreen('screen-app');
+    updateAdminUI();
+    showTab('me');
   } else {
     showScreen('screen-select');
     renderSelectScreen();
@@ -961,7 +965,18 @@ window.exitGhostMode = async function() {
 // ─── COMPETITION LOAD ────────────────────────────────────────────────────────
 async function loadMyComps() {
   const snap=await getDocs(query(collection(db,'competitionMembers'),where('userId','==',uid())));
-  myCompetitions=snap.docs.map(d=>d.data()).filter(c=>!c.archived);
+  const all=snap.docs.map(d=>d.data());
+  // Cross-check each competition doc for archived:true — the index doc may not have the flag
+  const checked=await Promise.all(all.map(async c=>{
+    try {
+      const s=await getDoc(doc(db,'competitions',c.compId));
+      if(!s.exists()) return null;
+      return {...c,_archived:s.data().archived===true};
+    } catch(e){ return {...c,_archived:c.archived===true}; }
+  }));
+  const valid=checked.filter(Boolean);
+  myCompetitions=valid.filter(c=>!c._archived);
+  myArchivedCompetitions=valid.filter(c=>c._archived);
 }
 
 async function enterComp(compId) {
@@ -973,9 +988,9 @@ async function enterComp(compId) {
   stopCompListeners();
   startCompListeners();
   showScreen('screen-app');
+  // Archived comps land on Compete tab (shows read-only banner) — active comps land on Compete too
   showTab('compete');
   currentMatchupWeek=getCurrentWeek();
-  // Show ghost banner if viewing as another user
   updateGhostBanner();
 }
 
@@ -989,8 +1004,14 @@ window.switchComp=async function(){
   currentCompId=null; currentComp=null; compMembership=null;
   competitors=[]; allWeighIns=[]; matchups=[]; matchupsLoaded=false;
   await loadMyComps();
-  showScreen('screen-select');
-  renderSelectScreen();
+  if(myCompetitions.length===0) {
+    showScreen('screen-app');
+    updateAdminUI();
+    showTab('me');
+  } else {
+    showScreen('screen-select');
+    renderSelectScreen();
+  }
 };
 
 // ─── COMPETITION SELECT SCREEN ───────────────────────────────────────────────
