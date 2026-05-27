@@ -1111,9 +1111,10 @@ window.createComp=async function(){
 let activeTab='compete', activeSub={compete:'overview',me:'journey',social:'feed',settings:'prefs'};
 
 function showTab(tab) {
-  // Show float button only when in app and a comp is loaded
+  // Float button: always show on Me tab (personal weigh-ins work without a competition)
+  // Also show on Compete tab when in an active competition
   const fb=$('float-btn');
-  if(fb) fb.style.display=currentCompId?'flex':'none';
+  if(fb) fb.style.display=(tab==='me'||(tab==='compete'&&currentCompId))?'flex':'none';
   activeTab=tab;
   document.querySelectorAll('.tab-panel').forEach(el=>el.style.display='none');
   const panel=$('tab-'+tab); if(panel) panel.style.display='block';
