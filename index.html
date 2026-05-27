@@ -60,7 +60,6 @@ let chatMessages   = [];
 
 // My competitions list
 let myCompetitions = [];
-let myArchivedCompetitions = [];
 
 // Listeners
 let unsubs = [];
@@ -416,6 +415,33 @@ function fmtPct(v)    { if(v==null||isNaN(v)) return '—'; return (v>=0?'−':'
 function fmtMoney(v)  { return '$'+Number(v||0).toFixed(2); }
 function fmtDate(s)   { if(!s) return '—'; try { return new Date(s+'T00:00:00').toLocaleDateString('en-NZ',{day:'numeric',month:'short',year:'numeric'}); } catch(e){ return s; } }
 
+// ─── USER TAG HELPERS ────────────────────────────────────────────────────────
+// Generates a base tag from a display name: lowercase, letters/numbers/underscores only
+function tagBase(name) {
+  return (name||'user').toLowerCase().replace(/[^a-z0-9]/g,'_').replace(/_+/g,'_').replace(/^_|_$/g,'').substring(0,18)||'user';
+}
+// Generates a unique @tag, appending numbers until unique
+async function generateUniqueTag(name) {
+  const base=tagBase(name);
+  // Try the plain base first, then base_2, base_3, etc.
+  const candidates=[base,...Array.from({length:99},(_,i)=>`${base}_${i+2}`)];
+  for(const candidate of candidates) {
+    const snap=await getDocs(query(collection(db,'users'),where('userTag','==',candidate)));
+    if(snap.empty) return candidate;
+  }
+  // Fallback: base + random 4-digit number (virtually impossible to collide)
+  return base+'_'+Math.floor(1000+Math.random()*9000);
+}
+// Checks if a tag is available (ignoring the current user's own tag)
+async function isTagAvailable(tag, currentUid) {
+  const snap=await getDocs(query(collection(db,'users'),where('userTag','==',tag)));
+  return snap.empty || (snap.docs.length===1 && snap.docs[0].id===currentUid);
+}
+// Normalise tag input: strip leading @, lowercase, valid chars only
+function normaliseTag(raw) {
+  return raw.replace(/^@/,'').toLowerCase().replace(/[^a-z0-9_]/g,'').substring(0,24);
+}
+
 const AVATAR_COLORS=['#7c6af7','#5fd4b3','#f7b26a','#e05252','#f7d76a','#a78bfa','#34d399','#fb923c','#f472b6','#60a5fa'];
 function avatarColor(name) { let h=0; for(let i=0;i<(name||'').length;i++) h=(h*31+name.charCodeAt(i))&0xffffffff; return AVATAR_COLORS[Math.abs(h)%AVATAR_COLORS.length]; }
 function avatar(name, size=36) {
@@ -566,10 +592,17 @@ onAuthStateChanged(auth, async user=>{
   if(!user) { showScreen('screen-auth'); return; }
   const snap=await getDoc(doc(db,'users',user.uid));
   if(!snap.exists()) {
-    await setDoc(doc(db,'users',user.uid),{displayName:user.displayName||user.email,email:user.email,role:'user',createdAt:serverTimestamp()});
-    userProfile={displayName:user.displayName||user.email,email:user.email,role:'user'};
+    // Brand new user — auto-assign a tag silently, they can change it in Profile
+    const userTag=await generateUniqueTag(user.displayName||user.email);
+    await setDoc(doc(db,'users',user.uid),{displayName:user.displayName||user.email,email:user.email,role:'user',userTag,createdAt:serverTimestamp()});
+    userProfile={displayName:user.displayName||user.email,email:user.email,role:'user',userTag};
   } else {
     userProfile=snap.data();
+    // Existing user with no tag — show one-time prompt before continuing
+    if(!userProfile.userTag) {
+      await showTagSetupPrompt(user);
+      // userProfile.userTag will be set by the prompt handler before it resolves
+    }
   }
   checkPasswordReset();
   // Detect ?viewAs=UID&comp=COMPID from admin portal Live View
@@ -578,12 +611,10 @@ onAuthStateChanged(auth, async user=>{
   if(_viewAs && _viewComp && (userProfile?.role==='superAdmin'||userProfile?.role==='owner')) {
     ghostUid = _viewAs;
     ghostCompId = _viewComp;
-    // Clean URL so refreshing doesn't re-trigger
     history.replaceState({}, '', location.pathname);
   }
   await loadMyComps();
   startPersonalListeners();
-  // If ghost mode params set, enter that competition directly
   if(ghostCompId) {
     await enterComp(ghostCompId);
     return;
@@ -592,12 +623,9 @@ onAuthStateChanged(auth, async user=>{
     await enterComp(myCompetitions[0].compId);
   } else if(myCompetitions.length===0) {
     const code=sessionStorage.getItem('pendingJoin');
-    if(code) { sessionStorage.removeItem('pendingJoin'); await joinByCode(code); return; }
-    // No active competitions — go straight to app shell on Me tab
-    // Profile and personal tracker work without a competition
-    showScreen('screen-app');
-    updateAdminUI();
-    showTab('me');
+    if(code) { sessionStorage.removeItem('pendingJoin'); await joinByCode(code); }
+    else showScreen('screen-select');
+    renderSelectScreen();
   } else {
     showScreen('screen-select');
     renderSelectScreen();
@@ -641,6 +669,96 @@ window.showAuthTab=function(tab){
 };
 function friendlyErr(code) {
   return {'auth/user-not-found':'No account found','auth/wrong-password':'Incorrect password','auth/invalid-credential':'Incorrect email or password','auth/email-already-in-use':'Email already registered','auth/weak-password':'Password must be at least 6 characters','auth/invalid-email':'Invalid email address'}[code]||'Something went wrong';
+}
+
+// ─── ONE-TIME TAG SETUP PROMPT ───────────────────────────────────────────────
+// Shown once to existing users who pre-date the tag system.
+// Returns a Promise that resolves only after the user successfully saves a tag.
+async function showTagSetupPrompt(user) {
+  const suggested = await generateUniqueTag(userProfile?.displayName || user.email);
+  return new Promise(resolve => {
+    // Build modal
+    const overlay = document.createElement('div');
+    overlay.id = 'tag-setup-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;padding:20px';
+    overlay.innerHTML = `
+      <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:20px;padding:28px 24px;width:100%;max-width:380px;box-shadow:0 20px 60px rgba(0,0,0,0.5)">
+        <div style="text-align:center;margin-bottom:20px">
+          <div style="font-size:36px;margin-bottom:10px">👋</div>
+          <div style="font-family:Syne,sans-serif;font-weight:800;font-size:20px;margin-bottom:8px">One quick thing</div>
+          <p style="color:var(--muted);font-size:13px;line-height:1.6">We've added <strong style="color:var(--text)">@tags</strong> so people can find and add you as a friend. Choose yours below — you can always change it later in your Profile.</p>
+        </div>
+        <div style="margin-bottom:6px">
+          <label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);display:block;margin-bottom:6px">Your Tag</label>
+          <div style="display:flex;align-items:center;gap:0">
+            <span style="padding:9px 10px;background:var(--bg3);border:1px solid var(--border);border-right:none;border-radius:8px 0 0 8px;font-size:14px;color:var(--muted)">@</span>
+            <input id="tag-setup-input" type="text" class="input"
+              style="border-radius:0 8px 8px 0;border-left:none;font-family:DM Mono,monospace;font-size:15px;letter-spacing:0.5px"
+              value="${suggested}" maxlength="24"
+              oninput="this.value=normaliseTag(this.value);tagSetupCheck()">
+          </div>
+        </div>
+        <div id="tag-setup-msg" style="font-size:12px;min-height:18px;margin-bottom:16px;color:var(--muted)">This tag was auto-generated from your name — feel free to change it.</div>
+        <button id="tag-setup-btn" class="btn btn-primary" style="width:100%;padding:12px" onclick="tagSetupSave()">Set My Tag →</button>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    // Debounced availability check as they type
+    let checkTimer = null;
+    window.tagSetupCheck = function() {
+      const val = normaliseTag($('tag-setup-input')?.value || '');
+      const msg = $('tag-setup-msg');
+      const btn = $('tag-setup-btn');
+      if(!msg || !btn) return;
+      if(val.length < 3) {
+        msg.style.color = 'var(--danger)';
+        msg.textContent = 'Tag must be at least 3 characters.';
+        btn.disabled = true; return;
+      }
+      msg.style.color = 'var(--muted)';
+      msg.textContent = 'Checking availability...';
+      btn.disabled = true;
+      clearTimeout(checkTimer);
+      checkTimer = setTimeout(async () => {
+        const available = await isTagAvailable(val, user.uid);
+        if($('tag-setup-msg')) {
+          if(available) {
+            $('tag-setup-msg').style.color = 'var(--success)';
+            $('tag-setup-msg').textContent = '@' + val + ' is available ✓';
+            if($('tag-setup-btn')) $('tag-setup-btn').disabled = false;
+          } else {
+            $('tag-setup-msg').style.color = 'var(--danger)';
+            $('tag-setup-msg').textContent = '@' + val + ' is already taken — try another.';
+            if($('tag-setup-btn')) $('tag-setup-btn').disabled = true;
+          }
+        }
+      }, 500);
+    };
+
+    window.tagSetupSave = async function() {
+      const val = normaliseTag($('tag-setup-input')?.value || '');
+      const msg = $('tag-setup-msg');
+      const btn = $('tag-setup-btn');
+      if(val.length < 3) return;
+      if(btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+      const available = await isTagAvailable(val, user.uid);
+      if(!available) {
+        if(msg) { msg.style.color='var(--danger)'; msg.textContent='@'+val+' was just taken — try another.'; }
+        if(btn) { btn.disabled=false; btn.textContent='Set My Tag →'; }
+        return;
+      }
+      await updateDoc(doc(db, 'users', user.uid), {userTag: val});
+      userProfile = {...userProfile, userTag: val};
+      overlay.remove();
+      delete window.tagSetupCheck;
+      delete window.tagSetupSave;
+      toast('Tag set to @' + val + ' 🎉');
+      resolve();
+    };
+
+    // Run initial check on the suggested tag
+    window.tagSetupCheck();
+  });
 }
 
 // ─── LISTENERS ───────────────────────────────────────────────────────────────
@@ -843,22 +961,7 @@ window.exitGhostMode = async function() {
 // ─── COMPETITION LOAD ────────────────────────────────────────────────────────
 async function loadMyComps() {
   const snap=await getDocs(query(collection(db,'competitionMembers'),where('userId','==',uid())));
-  const all=snap.docs.map(d=>d.data());
-  myCompetitions=all.filter(c=>!c.archived);
-  // For archived ones, also fetch the competition doc to get the archived flag
-  // (competitionMembers may not have archived:true set — check the competition itself)
-  const archivedFromMember=all.filter(c=>c.archived);
-  // Also check competitions that are in Firestore with archived:true
-  const activeIds=myCompetitions.map(c=>c.compId);
-  const possiblyArchived=all.filter(c=>!c.archived);
-  const archiveChecks=await Promise.all(possiblyArchived.map(async c=>{
-    try { const s=await getDoc(doc(db,'competitions',c.compId)); return s.exists()&&s.data().archived?{...c,...s.data(),compId:c.compId}:null; } catch(e){return null;}
-  }));
-  const archivedFromComp=archiveChecks.filter(Boolean);
-  myArchivedCompetitions=[...archivedFromMember,...archivedFromComp];
-  // Remove from active list any that are actually archived in Firestore
-  const archivedIds=archivedFromComp.map(c=>c.compId);
-  myCompetitions=myCompetitions.filter(c=>!archivedIds.includes(c.compId));
+  myCompetitions=snap.docs.map(d=>d.data()).filter(c=>!c.archived);
 }
 
 async function enterComp(compId) {
@@ -886,27 +989,20 @@ window.switchComp=async function(){
   currentCompId=null; currentComp=null; compMembership=null;
   competitors=[]; allWeighIns=[]; matchups=[]; matchupsLoaded=false;
   await loadMyComps();
-  if(myCompetitions.length===0) {
-    showScreen('screen-app');
-    updateAdminUI();
-    showTab('me');
-  } else {
-    showScreen('screen-select');
-    renderSelectScreen();
-  }
+  showScreen('screen-select');
+  renderSelectScreen();
 };
 
 // ─── COMPETITION SELECT SCREEN ───────────────────────────────────────────────
 function renderSelectScreen() {
   const el=$('select-content'); if(!el) return;
   const active=myCompetitions.filter(c=>!c.archived);
-  const archived=myArchivedCompetitions;
   el.innerHTML=`
     <div class="auth-logo"><div style="font-size:36px">⚖️</div><div class="auth-logo-title">WeighBet</div></div>
     ${active.length===0?`
-      <div class="info-box" style="margin-bottom:24px"><p>You're not in any active competitions yet.</p></div>`:`
+      <div class="info-box" style="margin-bottom:24px"><p>You're not in any competitions yet.</p></div>`:`
       <div class="section-label">Your Competitions</div>
-      ${active.map(c=>`<button class="comp-row" data-cid="${c.compId}" onclick="enterComp(this.dataset.cid)">
+      ${active.map(c=>`<button class="comp-row" onclick="enterComp('${c.compId}')">
         <div>
           <div style="font-weight:600">${c.compName||'Unnamed'}</div>
           <div style="font-size:12px;color:var(--muted)">${c.role||'competitor'} · ${c.playerType==='free'?'Free':'Paying'}</div>
@@ -914,16 +1010,6 @@ function renderSelectScreen() {
         <span style="color:var(--muted)">→</span>
       </button>`).join('')}
     `}
-    ${archived.length>0?`
-      <div class="section-label" style="margin-top:24px">Past Competitions</div>
-      ${archived.map(c=>`<button class="comp-row" style="opacity:0.7" data-cid="${c.compId}" onclick="enterArchivedComp(this.dataset.cid)">
-        <div>
-          <div style="font-weight:600">${c.compName||c.name||'Unnamed'} <span style="font-size:11px;color:var(--muted);font-weight:400">· Ended</span></div>
-          <div style="font-size:12px;color:var(--muted)">${c.role||'competitor'} · ${c.playerType==='free'?'Free':'Paying'}</div>
-        </div>
-        <span style="color:var(--muted)">📦</span>
-      </button>`).join('')}
-    `:''}
     <div class="section-label" style="margin-top:24px">Join a Competition</div>
     <div style="display:flex;gap:8px">
       <input id="join-code-input" class="input" placeholder="Invite code" style="flex:1;text-transform:uppercase">
@@ -940,37 +1026,13 @@ function renderSelectScreen() {
       </div>
       <button class="btn btn-primary" onclick="createComp()">Create Competition</button>
     </div>
-    <div style="margin-top:24px;text-align:center;display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
-      <button class="btn btn-secondary" onclick="goToMyProfile()">👤 My Profile</button>
-      <button class="btn btn-ghost" onclick="doSignOut()">Sign Out</button>
-    </div>`;
+    <div style="margin-top:24px;text-align:center"><button class="btn btn-ghost" onclick="doSignOut()">Sign Out</button></div>`;
 }
 
 window.doJoinCode=async function(){
   const code=($('join-code-input')?.value||'').trim().toUpperCase();
   if(!code) return;
   await joinByCode(code);
-};
-
-// Navigate from select screen to app shell profile tab
-window.goToMyProfile=function(){
-  showScreen('screen-app');
-  updateAdminUI();
-  showTab('me');
-};
-
-// Enter an archived competition in read-only view
-window.enterArchivedComp=async function(compId){
-  currentCompId=compId;
-  const snap=await getDoc(doc(db,'competitions',compId));
-  currentComp=snap.data();
-  matchupsLoaded=false; matchups=[];
-  stopCompListeners();
-  startCompListeners();
-  showScreen('screen-app');
-  showTab('compete');
-  currentMatchupWeek=currentComp?.weeks||8;
-  updateGhostBanner();
 };
 
 async function joinByCode(code) {
@@ -1018,9 +1080,9 @@ window.createComp=async function(){
 let activeTab='compete', activeSub={compete:'overview',me:'journey',social:'feed',settings:'prefs'};
 
 function showTab(tab) {
-  // Float button shows on Me tab always (personal weigh-ins), or on Compete tab when in a comp
+  // Show float button only when in app and a comp is loaded
   const fb=$('float-btn');
-  if(fb) fb.style.display=(tab==='me'||(tab==='compete'&&currentCompId))?'flex':'none';
+  if(fb) fb.style.display=currentCompId?'flex':'none';
   activeTab=tab;
   document.querySelectorAll('.tab-panel').forEach(el=>el.style.display='none');
   const panel=$('tab-'+tab); if(panel) panel.style.display='block';
@@ -1058,7 +1120,7 @@ function renderSub(tab, sub) {
 
 function updateNavUser() {
   const name = userProfile?.displayName || currentUser?.email || '';
-  const comp = currentComp?.name || (currentCompId?'':myCompetitions.length>0?'Select a competition':'No competition');
+  const comp = currentComp?.name || '';
   const initials = name.split(' ').map(w=>w[0]).join('').substring(0,2).toUpperCase();
   const a1 = $('top-avatar'), a2 = $('side-avatar');
   const sn = $('side-name'), sc = $('side-comp');
@@ -1073,18 +1135,7 @@ window.refreshPage=refreshPage;
 // ─── COMPETE — OVERVIEW ──────────────────────────────────────────────────────
 function renderOverview() {
   const el=$('panel-overview'); if(!el) return;
-  if(!currentComp) {
-    el.innerHTML=`<div class="card" style="text-align:center;padding:32px 20px">
-      <div style="font-size:40px;margin-bottom:12px">🏆</div>
-      <h3 style="font-family:Syne,sans-serif;font-weight:800;font-size:18px;margin-bottom:8px">No Active Competition</h3>
-      <p style="color:var(--muted);font-size:14px;margin-bottom:20px">Join or create a competition to start competing.</p>
-      <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
-        <button class="btn btn-primary" onclick="switchComp()">⇄ Join / Create</button>
-        ${myArchivedCompetitions.length>0?`<button class="btn btn-secondary" onclick="switchComp()">📦 View Past Competitions</button>`:''}
-      </div>
-    </div>`;
-    return;
-  }
+  if(!currentComp) { el.innerHTML='<div class="empty">No competition loaded.</div>'; return; }
 
   const curWk=getCurrentWeek(), weeks=currentComp.weeks||8, over=isCompOver();
   const stats=competitors.map(c=>({
@@ -1136,7 +1187,6 @@ function renderOverview() {
   if(!inTop&&myStats) top.push(myStats);
 
   el.innerHTML=`
-    ${currentComp?.archived?`<div style="background:rgba(107,107,128,0.1);border:1px solid rgba(107,107,128,0.25);border-radius:12px;padding:12px 16px;margin-bottom:14px;display:flex;align-items:center;gap:12px;font-size:13px"><span style="font-size:20px">📦</span><div style="flex:1"><strong>Archived Competition</strong> — read-only view of final results.</div><button class="btn btn-secondary btn-sm" onclick="switchComp()">← Back</button></div>`:''}
     ${over?`<div class="card card-over"><div style="font-size:24px">🏁</div><h3>Competition Complete!</h3><p>Final results are in. See Prizes tab for the full breakdown.</p></div>`:''}
     <div class="stats-strip">
       <div class="stat-item"><div class="stat-val">${fmtPct(totalPctLost(uid()))}</div><div class="stat-lbl">Total Lost</div></div>
@@ -1612,8 +1662,8 @@ function renderJourney() {
     <div class="stats-strip">
       <div class="stat-item"><div class="stat-val">${fmtPct(totalPctLost(uid()))}</div><div class="stat-lbl">Total Lost</div></div>
       <div class="stat-item"><div class="stat-val">${wi.length}</div><div class="stat-lbl">Weigh-ins</div></div>
-      ${currentComp?`<div class="stat-item"><div class="stat-val" style="color:var(--success)">${fmtMoney(myEarnings)}</div><div class="stat-lbl">Earned</div></div>`:''}
-      ${currentComp?`<div class="stat-item"><div class="stat-val">${h2hWins}</div><div class="stat-lbl">H2H Wins</div></div>`:''}
+      <div class="stat-item"><div class="stat-val" style="color:var(--success)">${fmtMoney(myEarnings)}</div><div class="stat-lbl">Earned</div></div>
+      <div class="stat-item"><div class="stat-val">${h2hWins}</div><div class="stat-lbl">H2H Wins</div></div>
     </div>
 
     <div class="card">
@@ -1950,6 +2000,7 @@ function renderProfile() {
   const email=currentUser?.email||'';
   const role=compMembership?.role==='admin'?'Admin':isSA()?'Super Admin':'Competitor';
   const photo=userProfile?.photoUrl||null;
+  const tag=userProfile?.userTag||'';
 
   el.innerHTML=`
     <div class="card">
@@ -1961,11 +2012,23 @@ function renderProfile() {
         </div>
         <div>
           <div style="font-family:Syne,sans-serif;font-size:20px;font-weight:700">${name}</div>
-          <div style="color:var(--muted);font-size:13px">${email}</div>
+          ${tag?`<div style="display:flex;align-items:center;gap:6px;margin-top:3px">
+            <span style="font-family:DM Mono,monospace;font-size:13px;color:var(--accent)">@${tag}</span>
+            <button onclick="navigator.clipboard.writeText('@${tag}').then(()=>toast('Tag copied!'))" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:12px;padding:0" title="Copy tag">📋</button>
+          </div>`:''}
+          <div style="color:var(--muted);font-size:13px;margin-top:2px">${email}</div>
           <span class="badge badge-purple" style="margin-top:4px">${role}</span>
         </div>
       </div>
       <div class="form-group"><label class="label">Display Name</label><input type="text" id="profile-name" class="input" value="${name}"></div>
+      <div class="form-group">
+        <label class="label">Your Tag <span style="font-weight:400;color:var(--muted)">(used for friend search — no spaces)</span></label>
+        <div style="display:flex;align-items:center;gap:0">
+          <span style="padding:9px 10px;background:var(--bg3);border:1px solid var(--border);border-right:none;border-radius:8px 0 0 8px;font-size:14px;color:var(--muted)">@</span>
+          <input type="text" id="profile-tag" class="input" style="border-radius:0 8px 8px 0;border-left:none" value="${tag}" placeholder="your_tag" maxlength="24" oninput="this.value=normaliseTag(this.value)">
+        </div>
+        <div id="tag-check-msg" style="font-size:12px;margin-top:4px;color:var(--muted)"></div>
+      </div>
       <div class="form-group"><label class="label">Photo URL</label><input type="url" id="profile-photo" class="input" placeholder="https://..." value="${userProfile?.photoUrl||''}"></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <button class="btn btn-primary" onclick="saveProfile()">Save</button>
@@ -1977,15 +2040,31 @@ function renderProfile() {
 
 window.saveProfile=async function(){
   if(ghostUid){toast('Cannot edit profile while in Live View mode.','danger');return;}
-  const name=$('profile-name')?.value.trim(), photo=$('profile-photo')?.value.trim();
+  const name=$('profile-name')?.value.trim();
+  const photo=$('profile-photo')?.value.trim();
+  const newTag=normaliseTag($('profile-tag')?.value||'');
   const msg=$('profile-msg');
+  const tagMsg=$('tag-check-msg');
   if(!name){if(msg)msg.textContent='Name cannot be empty.';return;}
+  if(!newTag){if(msg)msg.textContent='Tag cannot be empty.';return;}
+  if(newTag.length<3){if(msg)msg.textContent='Tag must be at least 3 characters.';return;}
+  // Check tag uniqueness if it changed
+  if(newTag!==userProfile?.userTag) {
+    if(tagMsg) tagMsg.textContent='Checking availability...';
+    const available=await isTagAvailable(newTag, uid());
+    if(!available){
+      if(tagMsg){tagMsg.style.color='var(--danger)';tagMsg.textContent='@'+newTag+' is already taken — try another.';}
+      if(msg) msg.textContent='';
+      return;
+    }
+    if(tagMsg){tagMsg.style.color='var(--success)';tagMsg.textContent='@'+newTag+' is available ✓';}
+  }
   try {
-    await updateDoc(doc(db,'users',uid()),{displayName:name,...(photo?{photoUrl:photo}:{})});
+    await updateDoc(doc(db,'users',uid()),{displayName:name,userTag:newTag,...(photo?{photoUrl:photo}:{})});
     await updateProfile(currentUser,{displayName:name,...(photo?{photoURL:photo}:{})});
-    userProfile={...userProfile,displayName:name,...(photo?{photoUrl:photo}:{})};
-    if(msg){msg.textContent='✅ Saved!';setTimeout(()=>{msg.textContent='';closeLogModal();},1200);}
-  } catch(e){if(msg)msg.textContent='Error: '+e.message;}
+    userProfile={...userProfile,displayName:name,userTag:newTag,...(photo?{photoUrl:photo}:{})};
+    if(msg){msg.style.color='var(--success)';msg.textContent='✅ Saved!';setTimeout(()=>{if(msg)msg.textContent='';},2500);}
+  } catch(e){if(msg){msg.style.color='var(--danger)';msg.textContent='Error: '+e.message;}}
 };
 window.uploadPhoto=async function(input){
   const file=input.files[0]; if(!file) return;
@@ -2030,46 +2109,123 @@ window.postFeed=async function(){ const text=$('feed-input')?.value.trim(); if(!
 window.deleteFeedPost=async function(id){ if(!confirm('Delete post?')) return; await deleteDoc(doc(db,'feedPosts',id)); };
 
 // ─── SOCIAL — FRIENDS ────────────────────────────────────────────────────────
+
+// Helper: mask email for display — shows first char + *** + @domain
+function maskEmail(email) {
+  if(!email||!email.includes('@')) return '';
+  const [local,domain]=email.split('@');
+  return (local[0]||'')+'***@'+domain;
+}
+
+// Helper: get mutual competition name for a given uid (current comp only)
+function mutualCompNames(otherUid) {
+  const inCurrentComp=competitors.some(c=>c.uid===otherUid);
+  if(inCurrentComp&&currentComp) return currentComp.name||'Current competition';
+  return null;
+}
+
 function renderFriends() {
   const el=$('panel-friends'); if(!el) return;
   el.innerHTML=`
     ${friendRequests.length>0?`<div class="card"><div class="card-label">Friend Requests (${friendRequests.length})</div>
       ${friendRequests.map(r=>`<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
         ${avatar(r.fromName||'?',32)}
-        <span style="flex:1">${r.fromName||'Unknown'}</span>
-        <button class="btn btn-success btn-sm" data-id="${r.id}" onclick="respondReq(this.dataset.id,true)">✓</button>
-        <button class="btn btn-danger btn-sm" data-id="${r.id}" onclick="respondReq(this.dataset.id,false)">×</button>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:500;font-size:13px">${r.fromName||'Unknown'}</div>
+        </div>
+        <button class="btn btn-success btn-sm" data-id="${r.id}" onclick="respondReq(this.dataset.id,true)">✓ Accept</button>
+        <button class="btn btn-danger btn-sm" data-id="${r.id}" onclick="respondReq(this.dataset.id,false)">× Decline</button>
       </div>`).join('')}
     </div>`:''}
     <div class="card">
-      <div class="card-label">Friends (${friends.length})</div>
-      <div style="display:flex;gap:8px;margin-bottom:12px">
-        <input id="friend-search" class="input" placeholder="Search by name..." style="flex:1">
+      <div class="card-label">Add Friends</div>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px">Search by name, or use <strong style="font-family:DM Mono,monospace;color:var(--accent)">@tag</strong> for an exact match. Find your own tag in your Profile.</p>
+      <div style="display:flex;gap:8px;margin-bottom:6px">
+        <input id="friend-search" class="input" placeholder="Name or @tag..." style="flex:1" onkeydown="if(event.key==='Enter')searchFriends()">
         <button class="btn btn-primary btn-sm" onclick="searchFriends()">Search</button>
       </div>
+      <div id="friend-search-hint" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div>
       <div id="friend-results"></div>
-      ${friends.length===0?`<div class="empty">No friends yet. Search to add someone.</div>`
+    </div>
+    <div class="card">
+      <div class="card-label">Friends (${friends.length})</div>
+      ${friends.length===0?`<div class="empty">No friends yet. Search above to add someone.</div>`
       :friends.map(f=>{ const fUid=f.users.find(u=>u!==uid()); const fName=f.displayNames?.[fUid]||'Unknown'; return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
         ${avatar(fName,32)}
-        <span style="flex:1">${fName}</span>
+        <span style="flex:1;font-size:13px;font-weight:500">${fName}</span>
         <button class="btn btn-ghost btn-sm" data-uid="${fUid}" data-name="${fName}" onclick="startDM(this.dataset.uid,this.dataset.name)">💬</button>
         <button class="btn btn-danger btn-sm" data-id="${f.id}" onclick="removeFriend(this.dataset.id)">Remove</button>
       </div>`; }).join('')}
     </div>`;
 }
+
 window.searchFriends=async function(){
-  const q=($('friend-search')?.value||'').trim().toLowerCase();
-  if(!q) return;
-  const snap=await getDocs(collection(db,'users'));
-  const results=snap.docs.map(d=>({id:d.id,...d.data()})).filter(u=>u.id!==uid()&&((u.displayName||'').toLowerCase().includes(q)||(u.email||'').toLowerCase().includes(q)));
+  const raw=($('friend-search')?.value||'').trim();
+  const hintEl=$('friend-search-hint');
   const el=$('friend-results');
   if(!el) return;
-  el.innerHTML=results.length===0?`<div class="empty">No users found.</div>`:results.map(u=>{
+
+  if(raw.length<2) {
+    if(hintEl) hintEl.textContent='Enter at least 2 characters to search.';
+    el.innerHTML=''; return;
+  }
+  if(hintEl) hintEl.textContent='Searching...';
+
+  // Get pending outgoing requests
+  let pendingTo=[];
+  try {
+    const ps=await getDocs(query(collection(db,'friendships'),where('from','==',uid()),where('status','==','pending')));
+    pendingTo=ps.docs.map(d=>d.data().to);
+  } catch(e){}
+
+  let results=[];
+  const isTagSearch=raw.startsWith('@');
+
+  if(isTagSearch) {
+    // Exact tag lookup
+    const tag=normaliseTag(raw);
+    if(tag.length<2){if(hintEl)hintEl.textContent='Tag too short.';el.innerHTML='';return;}
+    const snap=await getDocs(query(collection(db,'users'),where('userTag','==',tag)));
+    results=snap.docs.map(d=>({id:d.id,...d.data()})).filter(u=>u.id!==uid());
+    if(hintEl) hintEl.textContent=results.length===0?`No user found with tag @${tag}.`:`Found @${tag}.`;
+  } else {
+    // Name search — client-side filter
+    const qLow=raw.toLowerCase();
+    const snap=await getDocs(collection(db,'users'));
+    results=snap.docs
+      .map(d=>({id:d.id,...d.data()}))
+      .filter(u=>u.id!==uid()&&((u.displayName||'').toLowerCase().includes(qLow)||(u.userTag||'').toLowerCase().includes(qLow)))
+      .slice(0,20);
+    if(hintEl){
+      if(results.length===0) hintEl.textContent=`No users found for "${raw}".`;
+      else if(results.length===20) hintEl.textContent='Showing first 20 results — use @tag for an exact match.';
+      else hintEl.textContent=`${results.length} result${results.length===1?'':'s'} found.`;
+    }
+  }
+
+  if(results.length===0){el.innerHTML=`<div class="empty">${isTagSearch?`No user found with tag @${normaliseTag(raw)}.`:`No users found for "${raw}".`}</div>`;return;}
+
+  el.innerHTML=results.map(u=>{
     const alreadyFriend=friends.some(f=>f.users.includes(u.id));
-    return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0">
-      ${avatar(u.displayName||'?',32)}
-      <span style="flex:1">${u.displayName||u.email}</span>
-      ${alreadyFriend?'<span class="tag">Friend</span>':`<button class="btn btn-primary btn-sm" data-uid="${u.id}" data-name="${encodeURIComponent(u.displayName||u.email||'')}" onclick="sendFriendReq(this.dataset.uid,decodeURIComponent(this.dataset.name))">+ Add</button>`}
+    const isPending=pendingTo.includes(u.id);
+    const inComp=mutualCompNames(u.id);
+    const maskedEmail=maskEmail(u.email||'');
+    const tagLine=u.userTag?`<span style="font-family:DM Mono,monospace;font-size:11px;color:var(--accent)">@${u.userTag}</span>`:'' ;
+    const contextLine=inComp?`<span style="color:var(--accent3);font-size:11px">● ${inComp}</span>`:maskedEmail?`<span style="color:var(--muted);font-size:11px">${maskedEmail}</span>`:'';
+    return `<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border)">
+      ${avatar(u.displayName||'?',36)}
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:500;font-size:13px">${u.displayName||u.email||'Unknown'}</div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:2px;flex-wrap:wrap">
+          ${tagLine}${contextLine?`<span style="color:var(--border2)">·</span>${contextLine}`:''}
+        </div>
+      </div>
+      ${alreadyFriend
+        ? '<span class="tag" style="flex-shrink:0">✓ Friends</span>'
+        : isPending
+          ? '<span style="font-size:12px;color:var(--muted);flex-shrink:0">⏳ Pending</span>'
+          : `<button class="btn btn-primary btn-sm" style="flex-shrink:0" data-uid="${u.id}" data-name="${encodeURIComponent(u.displayName||u.email||'')}" onclick="sendFriendReq(this.dataset.uid,decodeURIComponent(this.dataset.name))">+ Add</button>`
+      }
     </div>`;
   }).join('');
 };
@@ -2188,17 +2344,17 @@ function renderPrefs() {
     <div class="card">
       <div class="card-label">App</div>
       <div class="pref-row"><div><div style="font-weight:500">Appearance</div><div style="font-size:12px;color:var(--muted)">Light or dark theme</div></div><button class="btn btn-secondary" onclick="toggleTheme()" id="theme-btn">🌙 Dark</button></div>
-      <div class="pref-row"><div><div style="font-weight:500">${currentComp?'Switch Competition':'Join / Create Competition'}</div><div style="font-size:12px;color:var(--muted)">${currentComp?'Join a different competition':'Start or join a competition'}</div></div><button class="btn btn-secondary" onclick="switchComp()">⇄ ${currentComp?'Switch':'Go'}</button></div>
+      <div class="pref-row"><div><div style="font-weight:500">Switch Competition</div><div style="font-size:12px;color:var(--muted)">Join a different competition</div></div><button class="btn btn-secondary" onclick="switchComp()">⇄ Switch</button></div>
       <div class="pref-row"><div><div style="font-weight:500">Sign Out</div></div><button class="btn btn-danger" onclick="doSignOut()">⏻ Sign Out</button></div>
     </div>
-    ${currentComp?`<div class="card">
+    <div class="card">
       <div class="card-label">🔗 Invite People</div>
       <div class="invite-box"><div id="invite-code-disp" style="font-family:DM Mono,monospace;font-size:24px;font-weight:700;letter-spacing:4px">${currentComp?.inviteCode||'—'}</div></div>
       <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
         <button class="btn btn-teal btn-sm" onclick="copyLink()">🔗 Copy Invite Link</button>
         <button class="btn btn-secondary btn-sm" onclick="copyCode()">📋 Copy Code</button>
       </div>
-    </div>`:''}
+    </div>
     <div class="card">
       <div class="card-label">🐛 Report a Bug</div>
       <div class="form-group"><label class="label">What went wrong?</label><input id="bug-title" class="input" placeholder="e.g. Leaderboard not updating"></div>
@@ -2226,7 +2382,6 @@ window.submitBug=async function(){
 function renderAdminSettings() {
   const el=$('panel-admin'); if(!el) return;
   if(!isAdmin()) { el.innerHTML=`<div class="empty">Admin access required.</div>`; return; }
-  if(!currentComp) { el.innerHTML=`<div class="empty">No active competition. <button class="btn btn-primary btn-sm" style="margin-top:12px" onclick="switchComp()">Join or Create →</button></div>`; return; }
 
   el.innerHTML=`
     <div class="card">
@@ -2465,11 +2620,10 @@ window.saSuspend=async function(compId,suspend){ if(!confirm((suspend?'Suspend':
 window.exitGhost=function(){ const gb=$('ghost-bar'); if(gb) gb.style.display='none'; saGhostUid=null; goToSAPanel(); };
 
 window.enterComp=enterComp;
-window.enterArchivedComp=enterArchivedComp;
 window.joinByCode=joinByCode;
 window.joinComp=joinComp;
 window.renderSelectScreen=renderSelectScreen;
-window.goToMyProfile=goToMyProfile;
+window.normaliseTag=normaliseTag;
 </script>
 
 <style>
