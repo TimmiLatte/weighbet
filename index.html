@@ -60,6 +60,7 @@ let chatMessages   = [];
 
 // My competitions list
 let myCompetitions = [];
+let myArchivedCompetitions = [];
 
 // Listeners
 let unsubs = [];
@@ -591,9 +592,12 @@ onAuthStateChanged(auth, async user=>{
     await enterComp(myCompetitions[0].compId);
   } else if(myCompetitions.length===0) {
     const code=sessionStorage.getItem('pendingJoin');
-    if(code) { sessionStorage.removeItem('pendingJoin'); await joinByCode(code); }
-    else showScreen('screen-select');
-    renderSelectScreen();
+    if(code) { sessionStorage.removeItem('pendingJoin'); await joinByCode(code); return; }
+    // No active competitions — go straight to app shell on Me tab
+    // Profile and personal tracker work without a competition
+    showScreen('screen-app');
+    updateAdminUI();
+    showTab('me');
   } else {
     showScreen('screen-select');
     renderSelectScreen();
@@ -839,7 +843,22 @@ window.exitGhostMode = async function() {
 // ─── COMPETITION LOAD ────────────────────────────────────────────────────────
 async function loadMyComps() {
   const snap=await getDocs(query(collection(db,'competitionMembers'),where('userId','==',uid())));
-  myCompetitions=snap.docs.map(d=>d.data()).filter(c=>!c.archived);
+  const all=snap.docs.map(d=>d.data());
+  myCompetitions=all.filter(c=>!c.archived);
+  // For archived ones, also fetch the competition doc to get the archived flag
+  // (competitionMembers may not have archived:true set — check the competition itself)
+  const archivedFromMember=all.filter(c=>c.archived);
+  // Also check competitions that are in Firestore with archived:true
+  const activeIds=myCompetitions.map(c=>c.compId);
+  const possiblyArchived=all.filter(c=>!c.archived);
+  const archiveChecks=await Promise.all(possiblyArchived.map(async c=>{
+    try { const s=await getDoc(doc(db,'competitions',c.compId)); return s.exists()&&s.data().archived?{...c,...s.data(),compId:c.compId}:null; } catch(e){return null;}
+  }));
+  const archivedFromComp=archiveChecks.filter(Boolean);
+  myArchivedCompetitions=[...archivedFromMember,...archivedFromComp];
+  // Remove from active list any that are actually archived in Firestore
+  const archivedIds=archivedFromComp.map(c=>c.compId);
+  myCompetitions=myCompetitions.filter(c=>!archivedIds.includes(c.compId));
 }
 
 async function enterComp(compId) {
@@ -867,20 +886,27 @@ window.switchComp=async function(){
   currentCompId=null; currentComp=null; compMembership=null;
   competitors=[]; allWeighIns=[]; matchups=[]; matchupsLoaded=false;
   await loadMyComps();
-  showScreen('screen-select');
-  renderSelectScreen();
+  if(myCompetitions.length===0) {
+    showScreen('screen-app');
+    updateAdminUI();
+    showTab('me');
+  } else {
+    showScreen('screen-select');
+    renderSelectScreen();
+  }
 };
 
 // ─── COMPETITION SELECT SCREEN ───────────────────────────────────────────────
 function renderSelectScreen() {
   const el=$('select-content'); if(!el) return;
   const active=myCompetitions.filter(c=>!c.archived);
+  const archived=myArchivedCompetitions;
   el.innerHTML=`
     <div class="auth-logo"><div style="font-size:36px">⚖️</div><div class="auth-logo-title">WeighBet</div></div>
     ${active.length===0?`
-      <div class="info-box" style="margin-bottom:24px"><p>You're not in any competitions yet.</p></div>`:`
+      <div class="info-box" style="margin-bottom:24px"><p>You're not in any active competitions yet.</p></div>`:`
       <div class="section-label">Your Competitions</div>
-      ${active.map(c=>`<button class="comp-row" onclick="enterComp('${c.compId}')">
+      ${active.map(c=>`<button class="comp-row" data-cid="${c.compId}" onclick="enterComp(this.dataset.cid)">
         <div>
           <div style="font-weight:600">${c.compName||'Unnamed'}</div>
           <div style="font-size:12px;color:var(--muted)">${c.role||'competitor'} · ${c.playerType==='free'?'Free':'Paying'}</div>
@@ -888,6 +914,16 @@ function renderSelectScreen() {
         <span style="color:var(--muted)">→</span>
       </button>`).join('')}
     `}
+    ${archived.length>0?`
+      <div class="section-label" style="margin-top:24px">Past Competitions</div>
+      ${archived.map(c=>`<button class="comp-row" style="opacity:0.7" data-cid="${c.compId}" onclick="enterArchivedComp(this.dataset.cid)">
+        <div>
+          <div style="font-weight:600">${c.compName||c.name||'Unnamed'} <span style="font-size:11px;color:var(--muted);font-weight:400">· Ended</span></div>
+          <div style="font-size:12px;color:var(--muted)">${c.role||'competitor'} · ${c.playerType==='free'?'Free':'Paying'}</div>
+        </div>
+        <span style="color:var(--muted)">📦</span>
+      </button>`).join('')}
+    `:''}
     <div class="section-label" style="margin-top:24px">Join a Competition</div>
     <div style="display:flex;gap:8px">
       <input id="join-code-input" class="input" placeholder="Invite code" style="flex:1;text-transform:uppercase">
@@ -904,13 +940,37 @@ function renderSelectScreen() {
       </div>
       <button class="btn btn-primary" onclick="createComp()">Create Competition</button>
     </div>
-    <div style="margin-top:24px;text-align:center"><button class="btn btn-ghost" onclick="doSignOut()">Sign Out</button></div>`;
+    <div style="margin-top:24px;text-align:center;display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+      <button class="btn btn-secondary" onclick="goToMyProfile()">👤 My Profile</button>
+      <button class="btn btn-ghost" onclick="doSignOut()">Sign Out</button>
+    </div>`;
 }
 
 window.doJoinCode=async function(){
   const code=($('join-code-input')?.value||'').trim().toUpperCase();
   if(!code) return;
   await joinByCode(code);
+};
+
+// Navigate from select screen to app shell profile tab
+window.goToMyProfile=function(){
+  showScreen('screen-app');
+  updateAdminUI();
+  showTab('me');
+};
+
+// Enter an archived competition in read-only view
+window.enterArchivedComp=async function(compId){
+  currentCompId=compId;
+  const snap=await getDoc(doc(db,'competitions',compId));
+  currentComp=snap.data();
+  matchupsLoaded=false; matchups=[];
+  stopCompListeners();
+  startCompListeners();
+  showScreen('screen-app');
+  showTab('compete');
+  currentMatchupWeek=currentComp?.weeks||8;
+  updateGhostBanner();
 };
 
 async function joinByCode(code) {
@@ -958,9 +1018,9 @@ window.createComp=async function(){
 let activeTab='compete', activeSub={compete:'overview',me:'journey',social:'feed',settings:'prefs'};
 
 function showTab(tab) {
-  // Show float button only when in app and a comp is loaded
+  // Float button shows on Me tab always (personal weigh-ins), or on Compete tab when in a comp
   const fb=$('float-btn');
-  if(fb) fb.style.display=currentCompId?'flex':'none';
+  if(fb) fb.style.display=(tab==='me'||(tab==='compete'&&currentCompId))?'flex':'none';
   activeTab=tab;
   document.querySelectorAll('.tab-panel').forEach(el=>el.style.display='none');
   const panel=$('tab-'+tab); if(panel) panel.style.display='block';
@@ -998,7 +1058,7 @@ function renderSub(tab, sub) {
 
 function updateNavUser() {
   const name = userProfile?.displayName || currentUser?.email || '';
-  const comp = currentComp?.name || '';
+  const comp = currentComp?.name || (currentCompId?'':myCompetitions.length>0?'Select a competition':'No competition');
   const initials = name.split(' ').map(w=>w[0]).join('').substring(0,2).toUpperCase();
   const a1 = $('top-avatar'), a2 = $('side-avatar');
   const sn = $('side-name'), sc = $('side-comp');
@@ -1013,7 +1073,18 @@ window.refreshPage=refreshPage;
 // ─── COMPETE — OVERVIEW ──────────────────────────────────────────────────────
 function renderOverview() {
   const el=$('panel-overview'); if(!el) return;
-  if(!currentComp) { el.innerHTML='<div class="empty">No competition loaded.</div>'; return; }
+  if(!currentComp) {
+    el.innerHTML=`<div class="card" style="text-align:center;padding:32px 20px">
+      <div style="font-size:40px;margin-bottom:12px">🏆</div>
+      <h3 style="font-family:Syne,sans-serif;font-weight:800;font-size:18px;margin-bottom:8px">No Active Competition</h3>
+      <p style="color:var(--muted);font-size:14px;margin-bottom:20px">Join or create a competition to start competing.</p>
+      <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="switchComp()">⇄ Join / Create</button>
+        ${myArchivedCompetitions.length>0?`<button class="btn btn-secondary" onclick="switchComp()">📦 View Past Competitions</button>`:''}
+      </div>
+    </div>`;
+    return;
+  }
 
   const curWk=getCurrentWeek(), weeks=currentComp.weeks||8, over=isCompOver();
   const stats=competitors.map(c=>({
@@ -1065,6 +1136,7 @@ function renderOverview() {
   if(!inTop&&myStats) top.push(myStats);
 
   el.innerHTML=`
+    ${currentComp?.archived?`<div style="background:rgba(107,107,128,0.1);border:1px solid rgba(107,107,128,0.25);border-radius:12px;padding:12px 16px;margin-bottom:14px;display:flex;align-items:center;gap:12px;font-size:13px"><span style="font-size:20px">📦</span><div style="flex:1"><strong>Archived Competition</strong> — read-only view of final results.</div><button class="btn btn-secondary btn-sm" onclick="switchComp()">← Back</button></div>`:''}
     ${over?`<div class="card card-over"><div style="font-size:24px">🏁</div><h3>Competition Complete!</h3><p>Final results are in. See Prizes tab for the full breakdown.</p></div>`:''}
     <div class="stats-strip">
       <div class="stat-item"><div class="stat-val">${fmtPct(totalPctLost(uid()))}</div><div class="stat-lbl">Total Lost</div></div>
@@ -1540,8 +1612,8 @@ function renderJourney() {
     <div class="stats-strip">
       <div class="stat-item"><div class="stat-val">${fmtPct(totalPctLost(uid()))}</div><div class="stat-lbl">Total Lost</div></div>
       <div class="stat-item"><div class="stat-val">${wi.length}</div><div class="stat-lbl">Weigh-ins</div></div>
-      <div class="stat-item"><div class="stat-val" style="color:var(--success)">${fmtMoney(myEarnings)}</div><div class="stat-lbl">Earned</div></div>
-      <div class="stat-item"><div class="stat-val">${h2hWins}</div><div class="stat-lbl">H2H Wins</div></div>
+      ${currentComp?`<div class="stat-item"><div class="stat-val" style="color:var(--success)">${fmtMoney(myEarnings)}</div><div class="stat-lbl">Earned</div></div>`:''}
+      ${currentComp?`<div class="stat-item"><div class="stat-val">${h2hWins}</div><div class="stat-lbl">H2H Wins</div></div>`:''}
     </div>
 
     <div class="card">
@@ -2116,17 +2188,17 @@ function renderPrefs() {
     <div class="card">
       <div class="card-label">App</div>
       <div class="pref-row"><div><div style="font-weight:500">Appearance</div><div style="font-size:12px;color:var(--muted)">Light or dark theme</div></div><button class="btn btn-secondary" onclick="toggleTheme()" id="theme-btn">🌙 Dark</button></div>
-      <div class="pref-row"><div><div style="font-weight:500">Switch Competition</div><div style="font-size:12px;color:var(--muted)">Join a different competition</div></div><button class="btn btn-secondary" onclick="switchComp()">⇄ Switch</button></div>
+      <div class="pref-row"><div><div style="font-weight:500">${currentComp?'Switch Competition':'Join / Create Competition'}</div><div style="font-size:12px;color:var(--muted)">${currentComp?'Join a different competition':'Start or join a competition'}</div></div><button class="btn btn-secondary" onclick="switchComp()">⇄ ${currentComp?'Switch':'Go'}</button></div>
       <div class="pref-row"><div><div style="font-weight:500">Sign Out</div></div><button class="btn btn-danger" onclick="doSignOut()">⏻ Sign Out</button></div>
     </div>
-    <div class="card">
+    ${currentComp?`<div class="card">
       <div class="card-label">🔗 Invite People</div>
       <div class="invite-box"><div id="invite-code-disp" style="font-family:DM Mono,monospace;font-size:24px;font-weight:700;letter-spacing:4px">${currentComp?.inviteCode||'—'}</div></div>
       <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
         <button class="btn btn-teal btn-sm" onclick="copyLink()">🔗 Copy Invite Link</button>
         <button class="btn btn-secondary btn-sm" onclick="copyCode()">📋 Copy Code</button>
       </div>
-    </div>
+    </div>`:''}
     <div class="card">
       <div class="card-label">🐛 Report a Bug</div>
       <div class="form-group"><label class="label">What went wrong?</label><input id="bug-title" class="input" placeholder="e.g. Leaderboard not updating"></div>
@@ -2154,6 +2226,7 @@ window.submitBug=async function(){
 function renderAdminSettings() {
   const el=$('panel-admin'); if(!el) return;
   if(!isAdmin()) { el.innerHTML=`<div class="empty">Admin access required.</div>`; return; }
+  if(!currentComp) { el.innerHTML=`<div class="empty">No active competition. <button class="btn btn-primary btn-sm" style="margin-top:12px" onclick="switchComp()">Join or Create →</button></div>`; return; }
 
   el.innerHTML=`
     <div class="card">
@@ -2392,9 +2465,11 @@ window.saSuspend=async function(compId,suspend){ if(!confirm((suspend?'Suspend':
 window.exitGhost=function(){ const gb=$('ghost-bar'); if(gb) gb.style.display='none'; saGhostUid=null; goToSAPanel(); };
 
 window.enterComp=enterComp;
+window.enterArchivedComp=enterArchivedComp;
 window.joinByCode=joinByCode;
 window.joinComp=joinComp;
 window.renderSelectScreen=renderSelectScreen;
+window.goToMyProfile=goToMyProfile;
 </script>
 
 <style>
