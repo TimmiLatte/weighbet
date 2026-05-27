@@ -1166,7 +1166,18 @@ window.refreshPage=refreshPage;
 // ─── COMPETE — OVERVIEW ──────────────────────────────────────────────────────
 function renderOverview() {
   const el=$('panel-overview'); if(!el) return;
-  if(!currentComp) { el.innerHTML='<div class="empty">No competition loaded.</div>'; return; }
+  if(!currentComp) {
+    el.innerHTML=`<div class="card" style="text-align:center;padding:32px 20px">
+      <div style="font-size:40px;margin-bottom:12px">🏆</div>
+      <h3 style="font-family:Syne,sans-serif;font-weight:800;font-size:18px;margin-bottom:8px">No Active Competition</h3>
+      <p style="color:var(--muted);font-size:14px;margin-bottom:20px">Join or create a competition to start competing.</p>
+      <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="switchComp()">⇄ Join / Create</button>
+        ${myArchivedCompetitions.length>0?`<button class="btn btn-secondary" onclick="openArchivedList()">📦 Past Competitions</button>`:''}
+      </div>
+    </div>`;
+    return;
+  }
 
   const curWk=getCurrentWeek(), weeks=currentComp.weeks||8, over=isCompOver();
   const stats=competitors.map(c=>({
@@ -1384,6 +1395,15 @@ function renderWeekScroller() {
 
 function renderWeekly() {
   const el=$('panel-weekly'); if(!el) return;
+  if(!currentComp) {
+    el.innerHTML=`<div class="card" style="text-align:center;padding:32px 20px">
+      <div style="font-size:36px;margin-bottom:12px">⚔️</div>
+      <h3 style="font-family:Syne,sans-serif;font-weight:800;font-size:18px;margin-bottom:8px">No Active Competition</h3>
+      <p style="color:var(--muted);font-size:14px;margin-bottom:20px">H2H matchups will appear here once you join a competition.</p>
+      <button class="btn btn-primary" onclick="switchComp()">⇄ Join / Create</button>
+    </div>`;
+    return;
+  }
   el.innerHTML=`
     <div id="week-carousel-wrap">
       <div id="week-carousel-window"></div>
@@ -1562,6 +1582,15 @@ window.setLbSort=function(sort){
 // ─── COMPETE — PRIZES ────────────────────────────────────────────────────────
 function renderPrizes() {
   const el=$('panel-prizes'); if(!el) return;
+  if(!currentComp) {
+    el.innerHTML=`<div class="card" style="text-align:center;padding:32px 20px">
+      <div style="font-size:36px;margin-bottom:12px">💰</div>
+      <h3 style="font-family:Syne,sans-serif;font-weight:800;font-size:18px;margin-bottom:8px">No Active Competition</h3>
+      <p style="color:var(--muted);font-size:14px;margin-bottom:20px">Prize breakdowns will appear here once you join a competition.</p>
+      <button class="btn btn-primary" onclick="switchComp()">⇄ Join / Create</button>
+    </div>`;
+    return;
+  }
   if(!matchupsLoaded&&currentComp?.startDate) {
     el.innerHTML=`<div class="card"><div class="empty">⏳ Loading match data...</div></div>`;
     return;
@@ -2547,6 +2576,7 @@ window.openArchivedViewer=async function(compId){
     avWeighIns=ws.docs.map(d=>({id:d.id,...d.data()}));
     avMatchups=mps.docs.map(d=>({id:d.id,...d.data()}));
     avTab='leaderboard';
+    avSelectedWeek=avComp?.weeks||8; // start on final week for archived comps
     const titleEl=$('av-title');
     if(titleEl) titleEl.textContent=avComp.name||'Archived Competition';
     renderAvTabs();
@@ -2564,6 +2594,7 @@ window.closeArchivedViewer=function(){
 };
 
 window.setAvTab=function(tab){ avTab=tab; renderAvTabs(); renderAvBody(); };
+window.avChangeWeek=function(d){ const max=avComp?.weeks||8; avSelectedWeek=Math.max(1,Math.min(avSelectedWeek+d,max)); renderAvBody(); };
 
 function renderAvTabs() {
   const el=$('av-tabs'); if(!el) return;
@@ -2663,38 +2694,78 @@ function renderAvPrizes() {
     </div>`;
 }
 
+// Track selected week for archived viewer separately
+let avSelectedWeek = 1;
+
 function renderAvH2H() {
-  const weeks=avComp?.weeks||8;
-  let html='';
-  for(let w=weeks;w>=1;w--) {
-    const wMatches=avMatchups.filter(m=>m.week===w);
-    if(!wMatches.length) continue;
-    const myMatch=wMatches.find(m=>m.p1===uid()||m.p2===uid());
-    html+=`<div style="margin-bottom:6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted)">Week ${w}</div>`;
-    html+=wMatches.map(m=>{
-      const r=avH2HResult(m,w);
-      const isMyMatch=m.p1===uid()||m.p2===uid();
-      const p1name=avNameFor(m.p1), p2name=m.p2==='BYE'?'BYE':avNameFor(m.p2);
-      const won=r.winner===uid(), lost=r.winner&&r.winner!==uid()&&!r.tied;
-      return `<div class="compact-match ${isMyMatch?'compact-match-me':''}" style="margin-bottom:8px">
-        <div class="cm-row">
-          <div class="cm-player">
-            ${avatar(p1name,24)}
-            <span class="cm-name" style="color:${r.winner===m.p1?'var(--success)':r.winner&&r.winner!==m.p1?'var(--muted)':'var(--text)'}">${p1name}</span>
-            <span class="cm-pct" style="color:${r.winner===m.p1?'var(--success)':'var(--muted)'}">${r.p1pct!=null?fmtPct(r.p1pct):'—'}</span>
+  const weeks = avComp?.weeks || 8;
+  const w = avSelectedWeek;
+  const wm = avMatchups.filter(m => m.week === w);
+  const pool = avPrizePool();
+  const wBL = pool > 0 ? +(pool * 0.05 / weeks).toFixed(2) : 0;
+
+  // Weekly biggest loser (paying only)
+  const bl = avPayingMembers()
+    .map(c => ({uid: c.uid, name: avNameFor(c.uid), pct: avWeeklyPct(c.uid, w)}))
+    .filter(x => x.pct != null)
+    .sort((a, b) => b.pct - a.pct);
+
+  let content = '';
+
+  if (bl.length > 0) {
+    const isMe = bl[0].uid === uid();
+    content += `<div class="card card-bl">
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);margin-bottom:8px">📉 Weekly Biggest Loser</div>
+      <div style="display:flex;align-items:center;gap:10px">
+        ${avatar(bl[0].name, 40)}
+        <div>
+          <div style="font-weight:700;font-size:15px">${bl[0].name}${isMe ? ' <span class="tag">you</span>' : ''}</div>
+          <div style="font-size:16px;font-weight:800;color:var(--accent2)">${fmtPct(bl[0].pct)}</div>
+        </div>
+        ${wBL > 0 ? `<div style="margin-left:auto;font-weight:700;color:var(--accent3)">${fmtMoney(wBL)}</div>` : ''}
+      </div>
+    </div>`;
+  }
+
+  if (wm.length === 0) {
+    content += `<div class="empty">No matches for Week ${w}.</div>`;
+  } else {
+    content += wm.map(m => {
+      const r = avH2HResult(m, w);
+      const n1 = avNameFor(m.p1), n2 = m.p2 === 'BYE' ? 'BYE' : avNameFor(m.p2);
+      const p1w = r.winner === m.p1, p2w = r.winner === m.p2;
+      const isMyMatch = m.p1 === uid() || m.p2 === uid();
+      const matchType = avIsFree(m.p1) && (m.p2 === 'BYE' || avIsFree(m.p2)) ? 'Friendly' :
+                        (m.p2 !== 'BYE' && (avIsFree(m.p1) !== avIsFree(m.p2))) ? 'Wildcard' : 'Head to Head';
+      const myWin = r.winner === uid() || (r.tied && isMyMatch);
+      const myLoss = r.winner && r.winner !== uid() && isMyMatch;
+      return `<div class="card ${isMyMatch ? 'card-highlight' : ''}">
+        <div class="card-label">Week ${w} · ${matchType}</div>
+        <div class="matchup-vs">
+          <div class="matchup-player ${p2w && !r.tied ? 'dim' : ''}">
+            ${avatar(n1, 44)}
+            <div class="mp-name">${p1w || r.tied ? '👑 ' : ''}${n1}</div>
+            <div class="mp-pct ${p1w ? 'win' : ''}">${r.p1pct != null ? fmtPct(r.p1pct) : '—'}</div>
           </div>
-          <div class="cm-vs">VS</div>
-          <div class="cm-player cm-player-right">
-            <span class="cm-pct" style="color:${r.winner===m.p2?'var(--success)':'var(--muted)'}">${r.p2pct!=null?fmtPct(r.p2pct):'—'}</span>
-            <span class="cm-name" style="color:${r.winner===m.p2?'var(--success)':r.winner&&r.winner!==m.p2?'var(--muted)':'var(--text)'};text-align:right">${p2name}</span>
-            ${m.p2==='BYE'?'':avatar(p2name,24)}
+          <div class="vs-sep">VS</div>
+          <div class="matchup-player ${p1w && !r.tied ? 'dim' : ''}">
+            ${m.p2 === 'BYE' ? `<div class="avatar-bye">BYE</div>` : avatar(n2, 44)}
+            <div class="mp-name">${p2w || r.tied ? '👑 ' : ''}${n2}</div>
+            <div class="mp-pct ${p2w ? 'win' : ''}">${m.p2 === 'BYE' ? '—' : r.p2pct != null ? fmtPct(r.p2pct) : '—'}</div>
           </div>
         </div>
-        <span class="cm-note ${r.winner===uid()?'cm-note-win':r.winner&&r.winner!==uid()?'cm-note-loss':''}">${r.note}${r.prize>0?' · '+fmtMoney(r.prize):''}</span>
+        <div class="matchup-note ${myWin ? 'note-win' : myLoss ? 'note-loss' : ''}">${r.note}${r.prize > 0 && r.winner ? ' · ' + fmtMoney(r.prize) : ''}</div>
       </div>`;
     }).join('');
   }
-  return `<div class="card"><div class="card-label">⚔️ All H2H Results</div>${html||'<div class="empty">No matchups recorded.</div>'}</div>`;
+
+  return `
+    <div class="week-nav">
+      <button class="btn-icon" onclick="avChangeWeek(-1)" ${w <= 1 ? 'disabled' : ''}>◀</button>
+      <span style="font-weight:700;font-size:15px">Week ${w} of ${weeks}</span>
+      <button class="btn-icon" onclick="avChangeWeek(1)" ${w >= weeks ? 'disabled' : ''}>▶</button>
+    </div>
+    ${content}`;
 }
 
 function renderAvMyStats() {
@@ -3013,6 +3084,7 @@ window.openArchivedList=openArchivedList;
 window.openArchivedViewer=openArchivedViewer;
 window.closeArchivedViewer=closeArchivedViewer;
 window.setAvTab=setAvTab;
+window.avChangeWeek=avChangeWeek;
 </script>
 
 <style>
